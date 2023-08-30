@@ -1,8 +1,8 @@
 #pragma once
 
-#include <device.h>
-#include <drivers/spi.h>
-#include <drivers/i2c.h>
+#include <zephyr/device.h>
+#include <zephyr/drivers/spi.h>
+#include <zephyr/drivers/i2c.h>
 
 #define PINNACLE_READ       0xA0
 #define PINNACLE_WRITE      0x80
