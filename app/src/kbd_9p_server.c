@@ -10,6 +10,7 @@
 #include <zephyr/init.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/bluetooth/bluetooth.h>
+#include <zephyr/shell/shell.h>
 #include <zephyr/9p/server.h>
 #include <zephyr/9p/transport_l2cap.h>
 #include <zmk/event_manager.h>
@@ -517,6 +518,92 @@ int kbd_9p_server_init(void)
 
 	return 0;
 }
+
+/* Shell command to check 9P keyboard status */
+static int cmd_kbd9p_status(const struct shell *sh, size_t argc, char **argv)
+{
+	shell_print(sh, "=== 9P Keyboard Server Status ===");
+
+	/* Check if BLE is enabled */
+	if (bt_is_ready()) {
+		shell_print(sh, "BLE: Enabled");
+	} else {
+		shell_print(sh, "BLE: NOT enabled - initialization may have failed");
+		return 0;
+	}
+
+	/* Show scan code buffer status */
+	k_mutex_lock(&scancode_mutex, K_FOREVER);
+	size_t buffered = 0;
+	if (scancode_head >= scancode_tail) {
+		buffered = scancode_head - scancode_tail;
+	} else {
+		buffered = SCANCODE_BUF_SIZE - scancode_tail + scancode_head;
+	}
+	k_mutex_unlock(&scancode_mutex);
+
+	shell_print(sh, "Scan code buffer: %zu / %d", buffered, SCANCODE_BUF_SIZE);
+
+	/* Show LED state */
+	k_mutex_lock(&led_mutex, K_FOREVER);
+	shell_print(sh, "LED state: 0x%02X (NumLock=%d CapsLock=%d ScrollLock=%d)",
+	            led_state,
+	            !!(led_state & 0x01),
+	            !!(led_state & 0x02),
+	            !!(led_state & 0x04));
+	k_mutex_unlock(&led_mutex);
+
+	shell_print(sh, "\nNOTE: Check 'bt info' for BLE advertising status");
+
+	return 0;
+}
+
+/* Shell command to manually restart advertising */
+static int cmd_kbd9p_advertise(const struct shell *sh, size_t argc, char **argv)
+{
+	int ret;
+
+	/* Stop existing advertising if any */
+	ret = bt_le_adv_stop();
+	if (ret && ret != -EALREADY) {
+		shell_error(sh, "Failed to stop advertising: %d", ret);
+	}
+
+	/* Restart advertising */
+	ret = bt_le_adv_start(BT_LE_ADV_CONN_NAME, ad, ARRAY_SIZE(ad), NULL, 0);
+	if (ret) {
+		shell_error(sh, "Failed to start advertising: %d", ret);
+		return ret;
+	}
+
+	shell_print(sh, "BLE advertising started");
+	shell_print(sh, "  UUID: 0x1001");
+	shell_print(sh, "  PSM: 0x1001");
+
+	return 0;
+}
+
+/* Shell command to reset into bootloader */
+static int cmd_kbd9p_bootloader(const struct shell *sh, size_t argc, char **argv)
+{
+	shell_print(sh, "Resetting into bootloader in 1 second...");
+	k_sleep(K_MSEC(1000));
+
+	/* Trigger UF2 bootloader via magic value + reset */
+	NRF_POWER->GPREGRET = 0x57; // Magic value for Adafruit bootloader
+	NVIC_SystemReset();
+
+	return 0;
+}
+
+SHELL_STATIC_SUBCMD_SET_CREATE(sub_kbd9p,
+	SHELL_CMD(status, NULL, "Show 9P keyboard server status", cmd_kbd9p_status),
+	SHELL_CMD(advertise, NULL, "Start BLE advertising", cmd_kbd9p_advertise),
+	SHELL_CMD(bootloader, NULL, "Reset into UF2 bootloader", cmd_kbd9p_bootloader),
+	SHELL_SUBCMD_SET_END
+);
+
+SHELL_CMD_REGISTER(kbd9p, &sub_kbd9p, "9P keyboard server commands", NULL);
 
 /* Initialize at application level */
 SYS_INIT(kbd_9p_server_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
