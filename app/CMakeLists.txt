@@ -85,6 +85,9 @@ if ((NOT CONFIG_ZMK_SPLIT) OR CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
     target_sources(app PRIVATE src/ble.c)
     target_sources(app PRIVATE src/hog.c)
   endif()
+
+  # 9P keyboard server (when not using ZMK_BLE)
+  target_sources_ifdef(CONFIG_NINEP_SERVER app PRIVATE src/kbd_9p_server.c)
 endif()
 
 target_sources_ifdef(CONFIG_ZMK_RGB_UNDERGLOW app PRIVATE src/behaviors/behavior_rgb_underglow.c)
