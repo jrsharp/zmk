@@ -37,5 +37,9 @@ manifest:
       revision: 6cb4c283e76209d59c45fbcb218800cd19e9339d
       path: modules/msgs/zmk-studio-messages
       remote: zmkfirmware
+    - name: 9p4z
+      path: modules/lib/9p4z
+      url: /mnt2/src/9p4z
+      revision: main
   self:
     west-commands: scripts/west-commands.yml
