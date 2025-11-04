@@ -427,7 +427,7 @@ static uint8_t rx_buf[CONFIG_NINEP_MAX_MESSAGE_SIZE];
 /* BLE advertising */
 static const struct bt_data ad[] = {
 	BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
-	BT_DATA_BYTES(BT_DATA_UUID16_ALL, 0x01, 0x10),  // Custom 9P service (0x1001 little-endian)
+	BT_DATA_BYTES(BT_DATA_UUID16_ALL, 0x81, 0x00),  // Custom 9P service (0x0081 little-endian)
 };
 
 static void connected(struct bt_conn *conn, uint8_t err)
@@ -475,7 +475,7 @@ int kbd_9p_server_init(void)
 
 	/* Initialize L2CAP transport */
 	struct ninep_transport_l2cap_config l2cap_config = {
-		.psm = 0x1001,
+		.psm = 0x0081,
 		.rx_buf = rx_buf,
 		.rx_buf_size = sizeof(rx_buf),
 	};
@@ -577,8 +577,8 @@ static int cmd_kbd9p_advertise(const struct shell *sh, size_t argc, char **argv)
 	}
 
 	shell_print(sh, "BLE advertising started");
-	shell_print(sh, "  UUID: 0x1001");
-	shell_print(sh, "  PSM: 0x1001");
+	shell_print(sh, "  UUID: 0x0081");
+	shell_print(sh, "  PSM: 0x0081");
 
 	return 0;
 }
