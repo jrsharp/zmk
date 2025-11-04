@@ -45,3 +45,22 @@ RC(2,0) RC(2,1) RC(2,2) RC(2,3) RC(2,4) RC(2,5) RC(2,6) RC(2,7) RC(2,8) RC(2,9)
             ;
     };
 };
+/*
+ * Copyright (c) 2025 ZMK Contributors
+ * SPDX-License-Identifier: MIT
+ *
+ * USB CDC ACM console configuration for chocv keyboard
+ */
+
+/ {
+	chosen {
+		zephyr,console = &cdc_acm_uart;
+		zephyr,shell-uart = &cdc_acm_uart;
+	};
+};
+
+&zephyr_udc0 {
+	cdc_acm_uart: cdc_acm_uart {
+		compatible = "zephyr,cdc-acm-uart";
+	};
+};
