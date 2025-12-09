@@ -264,13 +264,24 @@ ZMK_LISTENER(kbd_9p_keycode, keycode_event_listener);
 ZMK_SUBSCRIPTION(kbd_9p_keycode, zmk_keycode_state_changed);
 
 /* 9P Filesystem nodes */
-static struct ninep_fs_node kbd_root_node;
-static struct ninep_fs_node kbin_node;
-static struct ninep_fs_node leds_node;
+static struct ninep_fs_node kbd_root_node = {
+	.qid = {.type = NINEP_QTDIR, .version = 0, .path = 1},
+};
+static struct ninep_fs_node kbin_node = {
+	.qid = {.type = NINEP_QTFILE, .version = 0, .path = 2},
+};
+static struct ninep_fs_node leds_node = {
+	.qid = {.type = NINEP_QTFILE, .version = 0, .path = 3},
+};
 
 /* Filesystem operations */
 static struct ninep_fs_node *fs_get_root(void *ctx)
 {
+	/* Force initialization to ensure qid is valid */
+	kbd_root_node.qid.type = NINEP_QTDIR;
+	kbd_root_node.qid.version = 0;
+	kbd_root_node.qid.path = 1;
+
 	return &kbd_root_node;
 }
 
@@ -453,17 +464,6 @@ BT_CONN_CB_DEFINE(conn_callbacks) = {
 int kbd_9p_server_init(void)
 {
 	int ret;
-
-	/* Initialize filesystem nodes */
-	kbd_root_node = (struct ninep_fs_node){
-		.qid = {.type = NINEP_QTDIR, .version = 0, .path = 1},
-	};
-	kbin_node = (struct ninep_fs_node){
-		.qid = {.type = NINEP_QTFILE, .version = 0, .path = 2},
-	};
-	leds_node = (struct ninep_fs_node){
-		.qid = {.type = NINEP_QTFILE, .version = 0, .path = 3},
-	};
 
 	/* Initialize BLE */
 	ret = bt_enable(NULL);

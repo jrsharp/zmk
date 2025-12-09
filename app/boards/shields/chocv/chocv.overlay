@@ -64,3 +64,62 @@ RC(2,0) RC(2,1) RC(2,2) RC(2,3) RC(2,4) RC(2,5) RC(2,6) RC(2,7) RC(2,8) RC(2,9)
 		compatible = "zephyr,cdc-acm-uart";
 	};
 };
+
+/*
+ * MCUboot flash partition layout for nice_nano_v2
+ *
+ * Flash layout (1MB total):
+ *   0x00000 - 0x0C000: MCUboot (48KB)
+ *   0x0C000 - 0x0E000: MCUboot scratch (8KB)
+ *   0x0E000 - 0xF0000: Primary slot / App (904KB)
+ *   0xF0000 - 0xF8000: Coredump storage (32KB)
+ *   0xF8000 - 0x100000: Settings/NVS (32KB)
+ */
+&flash0 {
+	/delete-node/ partitions;
+
+	partitions {
+		compatible = "fixed-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		/* MCUboot bootloader - matches bootloader build */
+		boot_partition: partition@0 {
+			label = "mcuboot";
+			reg = <0x00000000 0x0000c000>;
+			read-only;
+		};
+
+		/* Scratch area for MCUboot swap operations */
+		scratch_partition: partition@c000 {
+			label = "image-scratch";
+			reg = <0x0000c000 0x00002000>;
+		};
+
+		/* Primary application slot - this is where ZMK runs */
+		slot0_partition: partition@e000 {
+			label = "image-0";
+			reg = <0x0000e000 0x000e2000>;
+		};
+
+		/* Coredump storage for Memfault (32KB) */
+		coredump_partition: partition@f0000 {
+			label = "coredump";
+			reg = <0x000f0000 0x00008000>;
+		};
+
+		/* Settings/NVS storage (32KB) */
+		storage_partition: partition@f8000 {
+			label = "storage";
+			reg = <0x000f8000 0x00008000>;
+		};
+	};
+};
+
+/* Tell Zephyr which partition to use for the application code */
+/ {
+	chosen {
+		zephyr,code-partition = &slot0_partition;
+	};
+};
+

@@ -4,6 +4,8 @@ manifest:
       url-base: https://github.com/zephyrproject-rtos
     - name: zmkfirmware
       url-base: https://github.com/zmkfirmware
+    - name: memfault
+      url-base: https://github.com/memfault
   projects:
     - name: zephyr
       remote: zmkfirmware
@@ -23,8 +25,6 @@ manifest:
           - hal_st
           - hal_ti
           - loramac-node
-          - mcuboot
-          - mcumgr
           - net-tools
           - openthread
           - edtt
@@ -41,5 +41,9 @@ manifest:
       path: modules/lib/9p4z
       url: /mnt2/src/9p4z
       revision: main
+    - name: memfault-firmware-sdk
+      path: modules/lib/memfault-firmware-sdk
+      revision: 1.30.3
+      remote: memfault
   self:
     west-commands: scripts/west-commands.yml

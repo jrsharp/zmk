@@ -90,6 +90,12 @@ if ((NOT CONFIG_ZMK_SPLIT) OR CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
   target_sources_ifdef(CONFIG_NINEP_SERVER app PRIVATE src/kbd_9p_server.c)
 endif()
 
+# Memfault platform support
+# Note: The SDK provides fault handlers via its Zephyr port - we only need platform-specific code
+target_sources_ifdef(CONFIG_MEMFAULT app PRIVATE src/memfault_platform.c)
+target_sources_ifdef(CONFIG_MEMFAULT app PRIVATE src/memfault_test_cmd.c)
+target_sources_ifdef(CONFIG_MEMFAULT_COREDUMP_STORAGE_CUSTOM app PRIVATE src/memfault_flash_coredump.c)
+
 target_sources_ifdef(CONFIG_ZMK_RGB_UNDERGLOW app PRIVATE src/behaviors/behavior_rgb_underglow.c)
 target_sources_ifdef(CONFIG_ZMK_BACKLIGHT app PRIVATE src/behaviors/behavior_backlight.c)
 
