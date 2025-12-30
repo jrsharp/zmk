@@ -11,6 +11,7 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/shell/shell.h>
+#include <zephyr/sys/reboot.h>
 #include <zephyr/9p/server.h>
 #include <zephyr/9p/transport_l2cap.h>
 #include <zmk/event_manager.h>
@@ -333,7 +334,9 @@ static int fs_read(struct ninep_fs_node *node, uint64_t offset,
 
 		k_mutex_unlock(&scancode_mutex);
 
-		LOG_DBG("Read %zu scan codes from kbin", read_count);
+		if (read_count > 0) {
+			LOG_DBG("Read %zu scan codes from kbin", read_count);
+		}
 		return read_count;
 	}
 
@@ -410,7 +413,7 @@ static int fs_stat(struct ninep_fs_node *node, uint8_t *buf, size_t buf_size,
 
 	/* Write stat using ninep_write_stat helper */
 	int ret = ninep_write_stat(buf, buf_size, &offset, &node->qid, mode,
-	                            length, name, strlen(name));
+	                            length, name, strlen(name), uid, gid, muid);
 	if (ret < 0) {
 		return ret;
 	}
@@ -443,11 +446,24 @@ static const struct bt_data ad[] = {
 
 static void connected(struct bt_conn *conn, uint8_t err)
 {
+	struct bt_conn_info info;
+
 	if (err) {
 		LOG_ERR("BLE connection failed (err %u)", err);
 		return;
 	}
-	LOG_INF("BLE connected");
+
+	if (bt_conn_get_info(conn, &info) == 0) {
+		LOG_INF("BLE connected: role=%s, interval=%u, latency=%u, timeout=%u, sec_level=%d",
+		        info.role == BT_CONN_ROLE_CENTRAL ? "central" : "peripheral",
+		        info.le.interval, info.le.latency, info.le.timeout,
+		        info.security.level);
+	} else {
+		LOG_INF("BLE connected");
+	}
+
+	LOG_INF("L2CAP server ready on PSM 0x%04x - waiting for channel connections",
+	        CONFIG_NINEP_L2CAP_PSM);
 }
 
 static void disconnected(struct bt_conn *conn, uint8_t reason)
@@ -455,9 +471,28 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 	LOG_INF("BLE disconnected (reason %u)", reason);
 }
 
+static void security_changed(struct bt_conn *conn, bt_security_t level,
+                             enum bt_security_err err)
+{
+	if (err) {
+		LOG_ERR("Security change failed: level=%d, err=%d", level, err);
+	} else {
+		LOG_INF("Security level changed to %d", level);
+	}
+}
+
+static void le_param_updated(struct bt_conn *conn, uint16_t interval,
+                             uint16_t latency, uint16_t timeout)
+{
+	LOG_INF("LE params updated: interval=%u, latency=%u, timeout=%u",
+	        interval, latency, timeout);
+}
+
 BT_CONN_CB_DEFINE(conn_callbacks) = {
 	.connected = connected,
 	.disconnected = disconnected,
+	.security_changed = security_changed,
+	.le_param_updated = le_param_updated,
 };
 
 /* Initialize 9P keyboard server */
@@ -475,7 +510,7 @@ int kbd_9p_server_init(void)
 
 	/* Initialize L2CAP transport */
 	struct ninep_transport_l2cap_config l2cap_config = {
-		.psm = 0x0081,
+		.psm = CONFIG_NINEP_L2CAP_PSM,
 		.rx_buf = rx_buf,
 		.rx_buf_size = sizeof(rx_buf),
 	};
@@ -524,6 +559,12 @@ static int cmd_kbd9p_status(const struct shell *sh, size_t argc, char **argv)
 {
 	shell_print(sh, "=== 9P Keyboard Server Status ===");
 
+	/* Show 9P server info */
+	shell_print(sh, "9P Server: %s", kbd_server.transport ? "Running" : "Not initialized");
+	shell_print(sh, "L2CAP PSM: 0x%04X", CONFIG_NINEP_L2CAP_PSM);
+	shell_print(sh, "Max message size: %d", CONFIG_NINEP_MAX_MESSAGE_SIZE);
+	shell_print(sh, "Advertising UUID: 0x1001");
+
 	/* Check if BLE is enabled */
 	if (bt_is_ready()) {
 		shell_print(sh, "BLE: Enabled");
@@ -531,6 +572,13 @@ static int cmd_kbd9p_status(const struct shell *sh, size_t argc, char **argv)
 		shell_print(sh, "BLE: NOT enabled - initialization may have failed");
 		return 0;
 	}
+
+	/* Show dynamic channel config */
+	shell_print(sh, "\n--- L2CAP Configuration ---");
+	shell_print(sh, "Dynamic channels: %s",
+	            IS_ENABLED(CONFIG_BT_L2CAP_DYNAMIC_CHANNEL) ? "ENABLED" : "DISABLED");
+	shell_print(sh, "L2CAP TX MTU: %d", CONFIG_BT_L2CAP_TX_MTU);
+	shell_print(sh, "Server security level: BT_SECURITY_L1 (no encryption)");
 
 	/* Show scan code buffer status */
 	k_mutex_lock(&scancode_mutex, K_FOREVER);
@@ -542,6 +590,7 @@ static int cmd_kbd9p_status(const struct shell *sh, size_t argc, char **argv)
 	}
 	k_mutex_unlock(&scancode_mutex);
 
+	shell_print(sh, "\n--- Runtime State ---");
 	shell_print(sh, "Scan code buffer: %zu / %d", buffered, SCANCODE_BUF_SIZE);
 
 	/* Show LED state */
@@ -553,7 +602,8 @@ static int cmd_kbd9p_status(const struct shell *sh, size_t argc, char **argv)
 	            !!(led_state & 0x04));
 	k_mutex_unlock(&led_mutex);
 
-	shell_print(sh, "\nNOTE: Check 'bt info' for BLE advertising status");
+	shell_print(sh, "\nUse 'bt info' for BLE connection status");
+	shell_print(sh, "Use 'l2cap register 0x81' in shell to test L2CAP server (will fail if already registered)");
 
 	return 0;
 }
@@ -578,28 +628,46 @@ static int cmd_kbd9p_advertise(const struct shell *sh, size_t argc, char **argv)
 
 	shell_print(sh, "BLE advertising started");
 	shell_print(sh, "  UUID: 0x1001 (advertising)");
-	shell_print(sh, "  PSM: 0x0081 (L2CAP)");
+	shell_print(sh, "  PSM: 0x%04X (L2CAP)", CONFIG_NINEP_L2CAP_PSM);
 
 	return 0;
 }
 
-/* Shell command to reset into bootloader */
-static int cmd_kbd9p_bootloader(const struct shell *sh, size_t argc, char **argv)
+/* Shell command to reset device (MCUboot will run briefly then boot app) */
+static int cmd_kbd9p_reset(const struct shell *sh, size_t argc, char **argv)
 {
-	shell_print(sh, "Resetting into bootloader in 1 second...");
+	shell_print(sh, "Resetting device in 1 second...");
 	k_sleep(K_MSEC(1000));
 
-	/* Trigger UF2 bootloader via magic value + reset */
-	NRF_POWER->GPREGRET = 0x57; // Magic value for Adafruit bootloader
-	NVIC_SystemReset();
+	sys_reboot(SYS_REBOOT_COLD);
 
+	return 0;
+}
+
+/* Shell command to test logging - verifies logs appear on console */
+static int cmd_kbd9p_testlog(const struct shell *sh, size_t argc, char **argv)
+{
+	shell_print(sh, "Testing log output...");
+
+	/* Test different log levels */
+	LOG_ERR("TEST LOG: This is an ERROR level log from kbd_9p");
+	LOG_WRN("TEST LOG: This is a WARNING level log from kbd_9p");
+	LOG_INF("TEST LOG: This is an INFO level log from kbd_9p");
+	LOG_DBG("TEST LOG: This is a DEBUG level log from kbd_9p");
+
+	/* Also test printk */
+	printk("TEST PRINTK: Direct printk output\n");
+
+	shell_print(sh, "Log test complete. You should see 4 log lines above.");
+	shell_print(sh, "(ERR, WRN, INF, DBG) plus a printk line.");
 	return 0;
 }
 
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_kbd9p,
 	SHELL_CMD(status, NULL, "Show 9P keyboard server status", cmd_kbd9p_status),
 	SHELL_CMD(advertise, NULL, "Start BLE advertising", cmd_kbd9p_advertise),
-	SHELL_CMD(bootloader, NULL, "Reset into UF2 bootloader", cmd_kbd9p_bootloader),
+	SHELL_CMD(reset, NULL, "Reset device", cmd_kbd9p_reset),
+	SHELL_CMD(testlog, NULL, "Test log output (verify logging works)", cmd_kbd9p_testlog),
 	SHELL_SUBCMD_SET_END
 );
 

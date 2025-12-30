@@ -39,7 +39,7 @@ manifest:
       remote: zmkfirmware
     - name: 9p4z
       path: modules/lib/9p4z
-      url: /mnt2/src/9p4z
+      url: /mnt2/src/9p4z.tmp
       revision: main
     - name: memfault-firmware-sdk
       path: modules/lib/memfault-firmware-sdk
