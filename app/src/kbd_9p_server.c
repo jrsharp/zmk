@@ -12,14 +12,35 @@
 #include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/shell/shell.h>
 #include <zephyr/sys/reboot.h>
+#include <zephyr/drivers/gpio.h>
 #include <zephyr/9p/server.h>
 #include <zephyr/9p/transport_l2cap.h>
 #include <zmk/event_manager.h>
 #include <zmk/events/keycode_state_changed.h>
+#include <zmk/battery.h>
+#include <zephyr/drivers/sensor.h>
 #include <dt-bindings/zmk/hid_usage.h>
 #include <dt-bindings/zmk/hid_usage_pages.h>
 
 LOG_MODULE_REGISTER(kbd_9p, CONFIG_ZMK_LOG_LEVEL);
+
+/* Battery sensor device */
+#if DT_HAS_CHOSEN(zmk_battery)
+static const struct device *const battery_dev = DEVICE_DT_GET(DT_CHOSEN(zmk_battery));
+#else
+static const struct device *const battery_dev = NULL;
+#endif
+
+/* Status LED - nice!nano blue LED on P0.15 */
+static const struct gpio_dt_spec status_led = GPIO_DT_SPEC_GET_OR(DT_ALIAS(led0), gpios, {0});
+static bool status_led_ready = false;
+
+static void status_led_set(bool on)
+{
+	if (status_led_ready) {
+		gpio_pin_set_dt(&status_led, on ? 1 : 0);
+	}
+}
 
 /* PS/2 Set 1 Scan Code Translation Table */
 /* Maps HID usage codes (page 0x07 - Keyboard) to PS/2 Set 1 scan codes */
@@ -177,6 +198,15 @@ static size_t scancode_head = 0;
 static size_t scancode_tail = 0;
 static K_MUTEX_DEFINE(scancode_mutex);
 
+/* Semaphore for blocking reads on kbin - signaled when data available */
+static K_SEM_DEFINE(kbin_data_sem, 0, 1);
+
+/* Flag to indicate if a client is connected (for clean disconnect handling) */
+static atomic_t kbin_client_connected = ATOMIC_INIT(0);
+
+/* Timeout for blocking reads (30 seconds) - sends empty response for keepalive */
+#define KBIN_READ_TIMEOUT_MS 30000
+
 /* LED state */
 static uint8_t led_state = 0;
 static K_MUTEX_DEFINE(led_mutex);
@@ -190,9 +220,19 @@ static void add_scancode(uint8_t code)
 
 	/* If buffer full, drop oldest */
 	if (scancode_head == scancode_tail) {
+		printk("[PS2] OVERFLOW dropping oldest!\n");
 		scancode_tail = (scancode_tail + 1) % SCANCODE_BUF_SIZE;
 	}
 	k_mutex_unlock(&scancode_mutex);
+
+	/* Debug: show scancode added and current state */
+	printk("[PS2] +0x%02X (connected=%d, sem=%u)\n",
+	       code,
+	       (int)atomic_get(&kbin_client_connected),
+	       k_sem_count_get(&kbin_data_sem));
+
+	/* Wake up any blocking reader */
+	k_sem_give(&kbin_data_sem);
 }
 
 /* Helper: Translate HID usage to PS/2 scan code */
@@ -255,7 +295,9 @@ static int keycode_event_listener(const zmk_event_t *eh)
 		return 0;
 	}
 
-	LOG_DBG("Key event: usage=0x%04X state=%d", ev->keycode, ev->state);
+	/* Direct console output for debugging - shows key detection independent of 9P */
+	printk("[KEY] HID=0x%02X %s\n", ev->keycode, ev->state ? "DN" : "UP");
+
 	translate_hid_to_ps2(ev->keycode, ev->state);
 
 	return 0;
@@ -263,6 +305,25 @@ static int keycode_event_listener(const zmk_event_t *eh)
 
 ZMK_LISTENER(kbd_9p_keycode, keycode_event_listener);
 ZMK_SUBSCRIPTION(kbd_9p_keycode, zmk_keycode_state_changed);
+
+/* Also listen to position events to diagnose kscan issues */
+#include <zmk/events/position_state_changed.h>
+
+static int position_event_listener(const zmk_event_t *eh)
+{
+	const struct zmk_position_state_changed *ev = as_zmk_position_state_changed(eh);
+	if (!ev) {
+		return 0;
+	}
+
+	printk("[POS] row=%d col=%d %s\n",
+	       ev->position / 10, ev->position % 10,
+	       ev->state ? "DN" : "UP");
+	return 0;
+}
+
+ZMK_LISTENER(kbd_9p_position, position_event_listener);
+ZMK_SUBSCRIPTION(kbd_9p_position, zmk_position_state_changed);
 
 /* 9P Filesystem nodes */
 static struct ninep_fs_node kbd_root_node = {
@@ -273,6 +334,9 @@ static struct ninep_fs_node kbin_node = {
 };
 static struct ninep_fs_node leds_node = {
 	.qid = {.type = NINEP_QTFILE, .version = 0, .path = 3},
+};
+static struct ninep_fs_node battery_node = {
+	.qid = {.type = NINEP_QTFILE, .version = 0, .path = 4},
 };
 
 /* Filesystem operations */
@@ -291,21 +355,35 @@ static struct ninep_fs_node *fs_walk(struct ninep_fs_node *parent,
                                       void *ctx)
 {
 	if (parent != &kbd_root_node) {
+		printk("[9P] WALK fail - parent not root\n");
 		return NULL;
 	}
 
 	if (name_len == 4 && strncmp(name, "kbin", 4) == 0) {
+		printk("[9P] WALK -> kbin\n");
 		return &kbin_node;
 	}
 	if (name_len == 4 && strncmp(name, "leds", 4) == 0) {
+		printk("[9P] WALK -> leds\n");
 		return &leds_node;
 	}
+	if (name_len == 7 && strncmp(name, "battery", 7) == 0) {
+		printk("[9P] WALK -> battery\n");
+		return &battery_node;
+	}
 
+	printk("[9P] WALK fail - unknown: %.*s\n", name_len, name);
 	return NULL;
 }
 
 static int fs_open(struct ninep_fs_node *node, uint8_t mode, void *ctx)
 {
+	if (node == &kbin_node) {
+		printk("[9P] OPEN kbin - setting connected=1\n");
+		atomic_set(&kbin_client_connected, 1);
+	} else if (node == &leds_node) {
+		printk("[9P] OPEN leds\n");
+	}
 	/* Allow any mode for now */
 	return 0;
 }
@@ -314,29 +392,70 @@ static int fs_read(struct ninep_fs_node *node, uint64_t offset,
                    uint8_t *buf, uint32_t count, void *ctx)
 {
 	if (node == &kbin_node) {
-		/* Read scan codes from buffer */
-		k_mutex_lock(&scancode_mutex, K_FOREVER);
-
-		size_t available = 0;
-		if (scancode_head >= scancode_tail) {
-			available = scancode_head - scancode_tail;
-		} else {
-			available = SCANCODE_BUF_SIZE - scancode_tail + scancode_head;
-		}
-
-		size_t to_read = MIN(count, available);
+		/*
+		 * Blocking read on kbin - canonical Plan 9/Unix behavior.
+		 * Block until scan codes are available or timeout expires.
+		 * This dramatically reduces BLE radio duty cycle vs polling.
+		 *
+		 * NOTE: This works because L2CAP transport now uses a DEDICATED
+		 * workqueue (ninep_workqueue) instead of the system workqueue.
+		 * Blocking here won't affect ZMK event processing.
+		 */
 		size_t read_count = 0;
 
-		while (read_count < to_read && scancode_tail != scancode_head) {
-			buf[read_count++] = scancode_buf[scancode_tail];
-			scancode_tail = (scancode_tail + 1) % SCANCODE_BUF_SIZE;
+		while (read_count == 0) {
+			/* Check if client disconnected */
+			if (!atomic_get(&kbin_client_connected)) {
+				LOG_WRN("kbin: client disconnected, aborting read");
+				return -EIO;
+			}
+
+			/* Check if data is available */
+			k_mutex_lock(&scancode_mutex, K_FOREVER);
+
+			size_t available = 0;
+			if (scancode_head >= scancode_tail) {
+				available = scancode_head - scancode_tail;
+			} else {
+				available = SCANCODE_BUF_SIZE - scancode_tail + scancode_head;
+			}
+
+			if (available > 0) {
+				/* Data available - read it */
+				size_t to_read = MIN(count, available);
+
+				while (read_count < to_read && scancode_tail != scancode_head) {
+					buf[read_count++] = scancode_buf[scancode_tail];
+					scancode_tail = (scancode_tail + 1) % SCANCODE_BUF_SIZE;
+				}
+
+				k_mutex_unlock(&scancode_mutex);
+				printk("[9P] -%zu bytes:", read_count);
+				for (size_t i = 0; i < read_count && i < 8; i++) {
+					printk(" %02X", buf[i]);
+				}
+				printk("\n");
+				return read_count;
+			}
+
+			k_mutex_unlock(&scancode_mutex);
+
+			/*
+			 * No data available - block until signaled or timeout.
+			 * Timeout ensures connection stays alive and client can
+			 * detect server health. Returns empty read on timeout.
+			 */
+			printk("[9P] WAIT\n");
+			int ret = k_sem_take(&kbin_data_sem, K_MSEC(KBIN_READ_TIMEOUT_MS));
+			if (ret == -EAGAIN) {
+				/* Timeout - return empty read for keepalive */
+				printk("[9P] TIMEOUT\n");
+				return 0;
+			}
+			printk("[9P] WAKE\n");
+			/* Semaphore signaled - loop back to check for data */
 		}
 
-		k_mutex_unlock(&scancode_mutex);
-
-		if (read_count > 0) {
-			LOG_DBG("Read %zu scan codes from kbin", read_count);
-		}
 		return read_count;
 	}
 
@@ -350,6 +469,30 @@ static int fs_read(struct ninep_fs_node *node, uint64_t offset,
 			return 1;
 		}
 		return 0;
+	}
+
+	if (node == &battery_node) {
+		/* Read battery as "percentage millivolts\n" (e.g., "85 4023\n") */
+		if (offset > 0) {
+			return 0;  /* Already read, no more data */
+		}
+		uint8_t pct = zmk_battery_state_of_charge();
+		int mv = 0;
+
+		/* Get raw millivolts from sensor */
+		if (battery_dev && device_is_ready(battery_dev)) {
+			struct sensor_value voltage;
+			if (sensor_sample_fetch_chan(battery_dev, SENSOR_CHAN_GAUGE_VOLTAGE) == 0 &&
+			    sensor_channel_get(battery_dev, SENSOR_CHAN_GAUGE_VOLTAGE, &voltage) == 0) {
+				mv = voltage.val1 * 1000 + voltage.val2 / 1000;
+			}
+		}
+
+		int len = snprintf((char *)buf, count, "%u %d\n", pct, mv);
+		if (len < 0) {
+			return -EIO;
+		}
+		return MIN(len, (int)count);
 	}
 
 	return -EINVAL;
@@ -403,6 +546,10 @@ static int fs_stat(struct ninep_fs_node *node, uint8_t *buf, size_t buf_size,
 		name = "leds";
 		mode = 0644;  // Read-write file
 		length = 1;
+	} else if (node == &battery_node) {
+		name = "battery";
+		mode = 0444;  // Read-only file
+		length = 10;  // "100 4200\n" max
 	} else {
 		return -EINVAL;
 	}
@@ -453,6 +600,16 @@ static void connected(struct bt_conn *conn, uint8_t err)
 		return;
 	}
 
+	/* Note: kbin_client_connected is now set in fs_open() when client opens kbin,
+	 * not here on BLE connect. This ensures proper state after reconnect.
+	 */
+	printk("[STATE] BLE connected - awaiting 9P attach (connected=%d, sem=%u)\n",
+	       (int)atomic_get(&kbin_client_connected),
+	       k_sem_count_get(&kbin_data_sem));
+
+	/* Turn on status LED to indicate connection */
+	status_led_set(true);
+
 	if (bt_conn_get_info(conn, &info) == 0) {
 		LOG_INF("BLE connected: role=%s, interval=%u, latency=%u, timeout=%u, sec_level=%d",
 		        info.role == BT_CONN_ROLE_CENTRAL ? "central" : "peripheral",
@@ -469,6 +626,24 @@ static void connected(struct bt_conn *conn, uint8_t err)
 static void disconnected(struct bt_conn *conn, uint8_t reason)
 {
 	LOG_INF("BLE disconnected (reason %u)", reason);
+
+	/* Turn off status LED */
+	status_led_set(false);
+
+	/* Mark client as disconnected and wake any blocked reader */
+	atomic_set(&kbin_client_connected, 0);
+	printk("[STATE] Disconnected - waking blocked readers\n");
+	k_sem_give(&kbin_data_sem);
+
+	/* Reset semaphore to clean state for next connection */
+	k_sem_reset(&kbin_data_sem);
+
+	/* Clear any buffered scancodes from previous session */
+	k_mutex_lock(&scancode_mutex, K_FOREVER);
+	scancode_head = 0;
+	scancode_tail = 0;
+	k_mutex_unlock(&scancode_mutex);
+	printk("[STATE] Reset: sem=0, buffer cleared, connected=0\n");
 }
 
 static void security_changed(struct bt_conn *conn, bt_security_t level,
@@ -499,6 +674,19 @@ BT_CONN_CB_DEFINE(conn_callbacks) = {
 int kbd_9p_server_init(void)
 {
 	int ret;
+
+	/* Initialize status LED */
+	if (status_led.port && device_is_ready(status_led.port)) {
+		ret = gpio_pin_configure_dt(&status_led, GPIO_OUTPUT_INACTIVE);
+		if (ret == 0) {
+			status_led_ready = true;
+			LOG_INF("Status LED initialized (P0.15)");
+		} else {
+			LOG_WRN("Failed to configure status LED: %d", ret);
+		}
+	} else {
+		LOG_WRN("Status LED not available");
+	}
 
 	/* Initialize BLE */
 	ret = bt_enable(NULL);
@@ -591,6 +779,8 @@ static int cmd_kbd9p_status(const struct shell *sh, size_t argc, char **argv)
 	k_mutex_unlock(&scancode_mutex);
 
 	shell_print(sh, "\n--- Runtime State ---");
+	shell_print(sh, "Blocking reads: ENABLED (timeout %d sec)", KBIN_READ_TIMEOUT_MS / 1000);
+	shell_print(sh, "Client connected: %s", atomic_get(&kbin_client_connected) ? "YES" : "NO");
 	shell_print(sh, "Scan code buffer: %zu / %d", buffered, SCANCODE_BUF_SIZE);
 
 	/* Show LED state */
@@ -601,6 +791,17 @@ static int cmd_kbd9p_status(const struct shell *sh, size_t argc, char **argv)
 	            !!(led_state & 0x02),
 	            !!(led_state & 0x04));
 	k_mutex_unlock(&led_mutex);
+
+	/* Show battery level */
+	int bat_mv = 0;
+	if (battery_dev && device_is_ready(battery_dev)) {
+		struct sensor_value voltage;
+		if (sensor_sample_fetch_chan(battery_dev, SENSOR_CHAN_GAUGE_VOLTAGE) == 0 &&
+		    sensor_channel_get(battery_dev, SENSOR_CHAN_GAUGE_VOLTAGE, &voltage) == 0) {
+			bat_mv = voltage.val1 * 1000 + voltage.val2 / 1000;
+		}
+	}
+	shell_print(sh, "Battery: %u%% (%d mV)", zmk_battery_state_of_charge(), bat_mv);
 
 	shell_print(sh, "\nUse 'bt info' for BLE connection status");
 	shell_print(sh, "Use 'l2cap register 0x81' in shell to test L2CAP server (will fail if already registered)");
@@ -663,11 +864,21 @@ static int cmd_kbd9p_testlog(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+/* Shell command to inject a test scancode - verifies buffer and semaphore path */
+static int cmd_kbd9p_testkey(const struct shell *sh, size_t argc, char **argv)
+{
+	shell_print(sh, "Injecting test scancode 0x1E ('A' press)...");
+	add_scancode(0x1E);  /* 'A' key press */
+	shell_print(sh, "Done. If blocking read is working, client should receive it.");
+	return 0;
+}
+
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_kbd9p,
 	SHELL_CMD(status, NULL, "Show 9P keyboard server status", cmd_kbd9p_status),
 	SHELL_CMD(advertise, NULL, "Start BLE advertising", cmd_kbd9p_advertise),
 	SHELL_CMD(reset, NULL, "Reset device", cmd_kbd9p_reset),
 	SHELL_CMD(testlog, NULL, "Test log output (verify logging works)", cmd_kbd9p_testlog),
+	SHELL_CMD(testkey, NULL, "Inject test scancode to verify 9P path", cmd_kbd9p_testkey),
 	SHELL_SUBCMD_SET_END
 );
 
