@@ -16,3 +16,6 @@ __pycache__
 
 # clangd
 app/.cache/
+# Production signing keys - NEVER commit these
+keys/
+

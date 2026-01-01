@@ -1,6 +1,6 @@
 # MCUboot + Memfault Integration TODO
 
-## Status: Ready to Flash
+## Status: COMPLETE - Production Ready
 
 ### Completed
 - [x] Test current direct-flash coredump approach (failed - bootloader clears RAM)
@@ -9,13 +9,16 @@
 - [x] Update ZMK/chocv config for MCUboot compatibility
 - [x] Update flash partitions in DTS for MCUboot layout
 - [x] Build and sign ZMK firmware with MCUboot image format
-
-### In Progress
-- [ ] Wire SWD from nRF5340-DK P20 header to nice_nano_v2
+- [x] Wire SWD from nRF5340-DK P20 header to nice_nano_v2
+- [x] Flash MCUboot + ZMK via SWD
+- [x] Test MCUboot boot + USB CDC console
+- [x] Generate production ECDSA-P256 signing keys
+- [x] Document complete build process (see BUILD.md)
+- [x] Implement thread pool for concurrent 9P operations
+- [x] Add DFU support via /dev/firmware
 
 ### Pending
-- [ ] Flash MCUboot + ZMK via SWD (one-time operation)
-- [ ] Test MCUboot boot + USB DFU
+- [ ] Test 9P DFU firmware update
 - [ ] Verify Memfault coredumps persist through reset
 - [ ] (Optional) Switch Memfault to RAM->Flash two-stage coredump
 
@@ -25,11 +28,14 @@
 
 | File | Purpose |
 |------|---------|
-| `bootloader/mcuboot/boot/zephyr/build/zephyr/zephyr.hex` | MCUboot bootloader (48KB) |
-| `app/build/zephyr/zmk.signed.bin` | Signed ZMK firmware (289KB) |
-| `app/build/zephyr/zmk.signed.hex` | Signed ZMK (hex format) |
+| `bootloader/mcuboot/boot/zephyr/build/zephyr/zephyr.hex` | MCUboot bootloader (~21KB) |
+| `app/build/zephyr/zmk-signed.bin` | Signed ZMK firmware (~304KB) |
+| `app/build/zephyr/zmk-signed.hex` | Signed ZMK (hex format) |
 | **`app/build/mcuboot_zmk_merged.hex`** | **Complete flash image for SWD** |
-| `keys/nice_nano_ecdsa_p256.pem` | ECDSA-P256 signing key |
+| `keys/production-signing-key.pem` | ECDSA-P256 private key (KEEP SAFE!) |
+| `keys/production-signing-key-pub.pem` | ECDSA-P256 public key |
+
+**See BUILD.md for complete build instructions.**
 
 ---
 

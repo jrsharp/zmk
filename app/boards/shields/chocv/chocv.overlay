@@ -28,6 +28,9 @@ RC(2,0) RC(2,1) RC(2,2) RC(2,3) RC(2,4) RC(2,5) RC(2,6) RC(2,7) RC(2,8) RC(2,9)
         compatible = "zmk,kscan-gpio-matrix";
         label = "KSCAN";
         diode-direction = "col2row";
+        debounce-press-ms = <10>;
+        debounce-release-ms = <10>;
+        debounce-scan-period-ms = <1>;
 
         col-gpios
             = <&pro_micro 10 GPIO_ACTIVE_HIGH>
@@ -73,11 +76,12 @@ RC(2,0) RC(2,1) RC(2,2) RC(2,3) RC(2,4) RC(2,5) RC(2,6) RC(2,7) RC(2,8) RC(2,9)
 /*
  * MCUboot flash partition layout for nice_nano_v2
  *
- * Flash layout (1MB total):
- *   0x00000 - 0x0C000: MCUboot (48KB)
+ * Flash layout (1MB total) - with DFU secondary slot:
+ *   0x00000 - 0x0C000: MCUboot bootloader (48KB)
  *   0x0C000 - 0x0E000: MCUboot scratch (8KB)
- *   0x0E000 - 0xF0000: Primary slot / App (904KB)
- *   0xF0000 - 0xF8000: Coredump storage (32KB)
+ *   0x0E000 - 0x72000: Primary slot / App (400KB)
+ *   0x72000 - 0xD6000: Secondary slot / DFU (400KB)
+ *   0xD6000 - 0xF8000: Coredump storage (136KB)
  *   0xF8000 - 0x100000: Settings/NVS (32KB)
  */
 &flash0 {
@@ -104,16 +108,22 @@ RC(2,0) RC(2,1) RC(2,2) RC(2,3) RC(2,4) RC(2,5) RC(2,6) RC(2,7) RC(2,8) RC(2,9)
 		/* Primary application slot - this is where ZMK runs */
 		slot0_partition: partition@e000 {
 			label = "image-0";
-			reg = <0x0000e000 0x000e2000>;
+			reg = <0x0000e000 0x00064000>;
 		};
 
-		/* Coredump storage for Memfault (32KB) */
-		coredump_partition: partition@f0000 {
+		/* Secondary slot for DFU - 9P /dev/firmware writes here */
+		slot1_partition: partition@72000 {
+			label = "image-1";
+			reg = <0x00072000 0x00064000>;
+		};
+
+		/* Coredump storage for Memfault (136KB) */
+		coredump_partition: partition@d6000 {
 			label = "coredump";
-			reg = <0x000f0000 0x00008000>;
+			reg = <0x000d6000 0x00022000>;
 		};
 
-		/* Settings/NVS storage (32KB) */
+		/* Settings/NVS storage (32KB) - same location preserves data */
 		storage_partition: partition@f8000 {
 			label = "storage";
 			reg = <0x000f8000 0x00008000>;

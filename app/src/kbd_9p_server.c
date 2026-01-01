@@ -22,6 +22,20 @@
 #include <dt-bindings/zmk/hid_usage.h>
 #include <dt-bindings/zmk/hid_usage_pages.h>
 
+#if IS_ENABLED(CONFIG_NINEP_DFU)
+#include <zephyr/dfu/mcuboot.h>
+#include <zephyr/dfu/flash_img.h>
+#include <zephyr/storage/flash_map.h>
+#endif
+
+#if IS_ENABLED(CONFIG_NINEP_GATT_9PIS)
+#include <zephyr/9p/gatt_9pis.h>
+#endif
+
+#if IS_ENABLED(CONFIG_MEMFAULT)
+#include <memfault/core/data_packetizer.h>
+#endif
+
 LOG_MODULE_REGISTER(kbd_9p, CONFIG_ZMK_LOG_LEVEL);
 
 /* Battery sensor device */
@@ -211,6 +225,39 @@ static atomic_t kbin_client_connected = ATOMIC_INIT(0);
 static uint8_t led_state = 0;
 static K_MUTEX_DEFINE(led_mutex);
 
+/* DFU state */
+#if IS_ENABLED(CONFIG_NINEP_DFU)
+enum dfu_state {
+	DFU_IDLE,
+	DFU_ERASING,
+	DFU_RECEIVING,
+	DFU_FINALIZING,
+	DFU_COMPLETE,
+	DFU_ERROR,
+};
+
+static struct {
+	enum dfu_state state;
+	uint32_t bytes_written;
+	int last_error;
+	uint32_t last_progress_log;
+	struct flash_img_context flash_ctx;
+} dfu = {
+	.state = DFU_IDLE,
+};
+
+#define DFU_PROGRESS_LOG_INTERVAL (50 * 1024)
+
+static const char *dfu_state_names[] = {
+	[DFU_IDLE] = "idle",
+	[DFU_ERASING] = "erasing",
+	[DFU_RECEIVING] = "receiving",
+	[DFU_FINALIZING] = "finalizing",
+	[DFU_COMPLETE] = "complete",
+	[DFU_ERROR] = "error",
+};
+#endif /* CONFIG_NINEP_DFU */
+
 /* Helper: Add scan code to buffer */
 static void add_scancode(uint8_t code)
 {
@@ -339,6 +386,30 @@ static struct ninep_fs_node battery_node = {
 	.qid = {.type = NINEP_QTFILE, .version = 0, .path = 4},
 };
 
+/* Control node for system commands (reboot, etc.) */
+static struct ninep_fs_node ctl_node = {
+	.qid = {.type = NINEP_QTFILE, .version = 0, .path = 5},
+};
+
+/* /dev directory - exists when DFU or Memfault is enabled */
+#if IS_ENABLED(CONFIG_NINEP_DFU) || IS_ENABLED(CONFIG_MEMFAULT)
+static struct ninep_fs_node dev_node = {
+	.qid = {.type = NINEP_QTDIR, .version = 0, .path = 6},
+};
+#endif
+
+#if IS_ENABLED(CONFIG_NINEP_DFU)
+static struct ninep_fs_node firmware_node = {
+	.qid = {.type = NINEP_QTFILE, .version = 0, .path = 7},
+};
+#endif
+
+#if IS_ENABLED(CONFIG_MEMFAULT)
+static struct ninep_fs_node mflt_node = {
+	.qid = {.type = NINEP_QTFILE, .version = 0, .path = 8},
+};
+#endif
+
 /* Filesystem operations */
 static struct ninep_fs_node *fs_get_root(void *ctx)
 {
@@ -354,25 +425,55 @@ static struct ninep_fs_node *fs_walk(struct ninep_fs_node *parent,
                                       const char *name, uint16_t name_len,
                                       void *ctx)
 {
-	if (parent != &kbd_root_node) {
-		printk("[9P] WALK fail - parent not root\n");
+	/* Walk from root */
+	if (parent == &kbd_root_node) {
+		if (name_len == 4 && strncmp(name, "kbin", 4) == 0) {
+			printk("[9P] WALK -> kbin\n");
+			return &kbin_node;
+		}
+		if (name_len == 4 && strncmp(name, "leds", 4) == 0) {
+			printk("[9P] WALK -> leds\n");
+			return &leds_node;
+		}
+		if (name_len == 7 && strncmp(name, "battery", 7) == 0) {
+			printk("[9P] WALK -> battery\n");
+			return &battery_node;
+		}
+		if (name_len == 3 && strncmp(name, "ctl", 3) == 0) {
+			printk("[9P] WALK -> ctl\n");
+			return &ctl_node;
+		}
+#if IS_ENABLED(CONFIG_NINEP_DFU) || IS_ENABLED(CONFIG_MEMFAULT)
+		if (name_len == 3 && strncmp(name, "dev", 3) == 0) {
+			printk("[9P] WALK -> dev\n");
+			return &dev_node;
+		}
+#endif
+		printk("[9P] WALK fail - unknown: %.*s\n", name_len, name);
 		return NULL;
 	}
 
-	if (name_len == 4 && strncmp(name, "kbin", 4) == 0) {
-		printk("[9P] WALK -> kbin\n");
-		return &kbin_node;
+#if IS_ENABLED(CONFIG_NINEP_DFU) || IS_ENABLED(CONFIG_MEMFAULT)
+	/* Walk from /dev */
+	if (parent == &dev_node) {
+#if IS_ENABLED(CONFIG_NINEP_DFU)
+		if (name_len == 8 && strncmp(name, "firmware", 8) == 0) {
+			printk("[9P] WALK -> dev/firmware\n");
+			return &firmware_node;
+		}
+#endif
+#if IS_ENABLED(CONFIG_MEMFAULT)
+		if (name_len == 4 && strncmp(name, "mflt", 4) == 0) {
+			printk("[9P] WALK -> dev/mflt\n");
+			return &mflt_node;
+		}
+#endif
+		printk("[9P] WALK fail - unknown in dev: %.*s\n", name_len, name);
+		return NULL;
 	}
-	if (name_len == 4 && strncmp(name, "leds", 4) == 0) {
-		printk("[9P] WALK -> leds\n");
-		return &leds_node;
-	}
-	if (name_len == 7 && strncmp(name, "battery", 7) == 0) {
-		printk("[9P] WALK -> battery\n");
-		return &battery_node;
-	}
+#endif
 
-	printk("[9P] WALK fail - unknown: %.*s\n", name_len, name);
+	printk("[9P] WALK fail - invalid parent\n");
 	return NULL;
 }
 
@@ -389,17 +490,22 @@ static int fs_open(struct ninep_fs_node *node, uint8_t mode, void *ctx)
 }
 
 static int fs_read(struct ninep_fs_node *node, uint64_t offset,
-                   uint8_t *buf, uint32_t count, void *ctx)
+                   uint8_t *buf, uint32_t count, const char *uname, void *ctx)
 {
+	ARG_UNUSED(uname);
 	if (node == &kbin_node) {
 		/*
 		 * Blocking read on kbin - canonical Plan 9/Unix behavior.
 		 * Block until scan codes are available or timeout expires.
 		 * This dramatically reduces BLE radio duty cycle vs polling.
 		 *
-		 * NOTE: This works because L2CAP transport now uses a DEDICATED
+		 * NOTE: This works because L2CAP transport uses a DEDICATED
 		 * workqueue (ninep_workqueue) instead of the system workqueue.
 		 * Blocking here won't affect ZMK event processing.
+		 *
+		 * TODO: For true 9P multiplexing, we need the server to handle
+		 * blocking reads on a separate thread so other requests (battery,
+		 * DFU, etc.) can be processed concurrently.
 		 */
 		size_t read_count = 0;
 
@@ -430,11 +536,7 @@ static int fs_read(struct ninep_fs_node *node, uint64_t offset,
 				}
 
 				k_mutex_unlock(&scancode_mutex);
-				printk("[9P] -%zu bytes:", read_count);
-				for (size_t i = 0; i < read_count && i < 8; i++) {
-					printk(" %02X", buf[i]);
-				}
-				printk("\n");
+				printk("[9P] kbin -%zu bytes\n", read_count);
 				return read_count;
 			}
 
@@ -445,14 +547,11 @@ static int fs_read(struct ninep_fs_node *node, uint64_t offset,
 			 * Timeout ensures connection stays alive and client can
 			 * detect server health. Returns empty read on timeout.
 			 */
-			printk("[9P] WAIT\n");
 			int ret = k_sem_take(&kbin_data_sem, K_MSEC(KBIN_READ_TIMEOUT_MS));
 			if (ret == -EAGAIN) {
 				/* Timeout - return empty read for keepalive */
-				printk("[9P] TIMEOUT\n");
 				return 0;
 			}
-			printk("[9P] WAKE\n");
 			/* Semaphore signaled - loop back to check for data */
 		}
 
@@ -473,34 +572,140 @@ static int fs_read(struct ninep_fs_node *node, uint64_t offset,
 
 	if (node == &battery_node) {
 		/* Read battery as "percentage millivolts\n" (e.g., "85 4023\n") */
+		printk("[9P] battery read offset=%llu\n", offset);
 		if (offset > 0) {
+			printk("[9P] battery EOF\n");
 			return 0;  /* Already read, no more data */
 		}
+		printk("[9P] battery fetching...\n");
 		uint8_t pct = zmk_battery_state_of_charge();
 		int mv = 0;
 
 		/* Get raw millivolts from sensor */
 		if (battery_dev && device_is_ready(battery_dev)) {
 			struct sensor_value voltage;
+			printk("[9P] battery sensor fetch...\n");
 			if (sensor_sample_fetch_chan(battery_dev, SENSOR_CHAN_GAUGE_VOLTAGE) == 0 &&
 			    sensor_channel_get(battery_dev, SENSOR_CHAN_GAUGE_VOLTAGE, &voltage) == 0) {
 				mv = voltage.val1 * 1000 + voltage.val2 / 1000;
 			}
+			printk("[9P] battery sensor done\n");
 		}
 
 		int len = snprintf((char *)buf, count, "%u %d\n", pct, mv);
+		printk("[9P] battery: %u%% %dmV\n", pct, mv);
 		if (len < 0) {
 			return -EIO;
 		}
 		return MIN(len, (int)count);
 	}
 
+	if (node == &ctl_node) {
+		/* Read available control commands */
+		if (offset > 0) {
+			return 0;  /* Already read */
+		}
+		const char *help = "reboot - restart device\n";
+		size_t len = strlen(help);
+		size_t to_copy = MIN(len, (size_t)count);
+		memcpy(buf, help, to_copy);
+		return to_copy;
+	}
+
+#if IS_ENABLED(CONFIG_NINEP_DFU)
+	if (node == &firmware_node) {
+		/* Read firmware status */
+		if (offset > 0) {
+			return 0;  /* Already read */
+		}
+
+		char status[256];
+		int len = 0;
+
+		/* State */
+		len += snprintf(status + len, sizeof(status) - len,
+		                "state %s\n", dfu_state_names[dfu.state]);
+
+		/* Bytes written (during upload) */
+		if (dfu.state == DFU_RECEIVING) {
+			len += snprintf(status + len, sizeof(status) - len,
+			                "bytes %u\n", dfu.bytes_written);
+		}
+
+		/* Error code (on error) */
+		if (dfu.state == DFU_ERROR) {
+			len += snprintf(status + len, sizeof(status) - len,
+			                "error %d\n", dfu.last_error);
+		}
+
+		/* Current image version (slot0) */
+		struct mcuboot_img_header hdr;
+		int ret = boot_read_bank_header(FIXED_PARTITION_ID(slot0_partition),
+		                                &hdr, sizeof(hdr));
+		if (ret == 0 && hdr.mcuboot_version == 1) {
+			len += snprintf(status + len, sizeof(status) - len,
+			                "current %d.%d.%d+%d\n",
+			                hdr.h.v1.sem_ver.major,
+			                hdr.h.v1.sem_ver.minor,
+			                hdr.h.v1.sem_ver.revision,
+			                hdr.h.v1.sem_ver.build_num);
+		}
+
+		/* Pending image version (slot1) */
+		ret = boot_read_bank_header(FIXED_PARTITION_ID(slot1_partition),
+		                            &hdr, sizeof(hdr));
+		if (ret == 0 && hdr.mcuboot_version == 1) {
+			len += snprintf(status + len, sizeof(status) - len,
+			                "pending %d.%d.%d+%d\n",
+			                hdr.h.v1.sem_ver.major,
+			                hdr.h.v1.sem_ver.minor,
+			                hdr.h.v1.sem_ver.revision,
+			                hdr.h.v1.sem_ver.build_num);
+		}
+
+		/* Confirmation status */
+		len += snprintf(status + len, sizeof(status) - len,
+		                "confirmed %s\n",
+		                boot_is_img_confirmed() ? "yes" : "no");
+
+		size_t to_copy = MIN((size_t)len, (size_t)count);
+		memcpy(buf, status, to_copy);
+		return to_copy;
+	}
+#endif
+
+#if IS_ENABLED(CONFIG_MEMFAULT)
+	if (node == &mflt_node) {
+		/*
+		 * Memfault chunk export - each read returns one chunk.
+		 * ESP32 can relay these to Memfault cloud via HTTP POST.
+		 * Returns 0 bytes when no more data is available.
+		 */
+		if (offset > 0) {
+			/* Chunks are stateless - no offset support */
+			return 0;
+		}
+
+		size_t chunk_len = count;
+		bool has_data = memfault_packetizer_get_chunk(buf, &chunk_len);
+
+		if (has_data && chunk_len > 0) {
+			LOG_INF("mflt: exported chunk (%zu bytes)", chunk_len);
+			return chunk_len;
+		}
+
+		/* No more data available */
+		return 0;
+	}
+#endif
+
 	return -EINVAL;
 }
 
 static int fs_write(struct ninep_fs_node *node, uint64_t offset,
-                    const uint8_t *buf, uint32_t count, void *ctx)
+                    const uint8_t *buf, uint32_t count, const char *uname, void *ctx)
 {
+	ARG_UNUSED(uname);
 	if (node == &leds_node) {
 		/* Write LED state */
 		if (count > 0) {
@@ -520,6 +725,82 @@ static int fs_write(struct ninep_fs_node *node, uint64_t offset,
 		}
 		return 0;
 	}
+
+	if (node == &ctl_node) {
+		/* Handle control commands */
+		if (count >= 6 && strncmp((const char *)buf, "reboot", 6) == 0) {
+			LOG_INF("Received reboot command via /ctl");
+			printk("[9P] REBOOT command received\n");
+
+			/* Schedule reboot after 500ms to allow response to be sent */
+			k_sleep(K_MSEC(100));
+			sys_reboot(SYS_REBOOT_COLD);
+
+			/* Won't reach here */
+			return count;
+		}
+
+		LOG_WRN("Unknown ctl command: %.*s", count, buf);
+		return -EINVAL;
+	}
+
+#if IS_ENABLED(CONFIG_NINEP_DFU)
+	if (node == &firmware_node) {
+		int ret;
+
+		/* First write starts the upload - erase slot and init context */
+		if (dfu.state != DFU_RECEIVING) {
+			if (dfu.state == DFU_RECEIVING) {
+				LOG_WRN("DFU already in progress, resetting");
+			}
+
+			dfu.state = DFU_ERASING;
+			LOG_INF("DFU: erasing secondary slot...");
+
+			ret = boot_erase_img_bank(FIXED_PARTITION_ID(slot1_partition));
+			if (ret < 0) {
+				LOG_ERR("Failed to erase secondary slot: %d", ret);
+				dfu.state = DFU_ERROR;
+				dfu.last_error = ret;
+				return ret;
+			}
+			LOG_INF("DFU: secondary slot erased");
+
+			ret = flash_img_init(&dfu.flash_ctx);
+			if (ret < 0) {
+				LOG_ERR("Failed to init flash_img context: %d", ret);
+				dfu.state = DFU_ERROR;
+				dfu.last_error = ret;
+				return ret;
+			}
+
+			dfu.bytes_written = 0;
+			dfu.last_progress_log = 0;
+			dfu.state = DFU_RECEIVING;
+			LOG_INF("DFU: ready to receive firmware");
+		}
+
+		/* Write chunk to flash */
+		ret = flash_img_buffered_write(&dfu.flash_ctx, buf, count, false);
+		if (ret < 0) {
+			LOG_ERR("Flash write failed: %d", ret);
+			dfu.state = DFU_ERROR;
+			dfu.last_error = ret;
+			return ret;
+		}
+
+		dfu.bytes_written += count;
+
+		/* Progress logging every 50KB */
+		if ((dfu.bytes_written / DFU_PROGRESS_LOG_INTERVAL) >
+		    (dfu.last_progress_log / DFU_PROGRESS_LOG_INTERVAL)) {
+			LOG_INF("DFU: %u bytes received", dfu.bytes_written);
+			dfu.last_progress_log = dfu.bytes_written;
+		}
+
+		return count;
+	}
+#endif
 
 	/* kbin is read-only */
 	return -EPERM;
@@ -550,6 +831,28 @@ static int fs_stat(struct ninep_fs_node *node, uint8_t *buf, size_t buf_size,
 		name = "battery";
 		mode = 0444;  // Read-only file
 		length = 10;  // "100 4200\n" max
+	} else if (node == &ctl_node) {
+		name = "ctl";
+		mode = 0644;  // Read-write file
+		length = 32;  // Help text length
+#if IS_ENABLED(CONFIG_NINEP_DFU) || IS_ENABLED(CONFIG_MEMFAULT)
+	} else if (node == &dev_node) {
+		name = "dev";
+		mode = 0x80000000 | 0755;  // Directory with rwxr-xr-x
+		length = 0;
+#endif
+#if IS_ENABLED(CONFIG_NINEP_DFU)
+	} else if (node == &firmware_node) {
+		name = "firmware";
+		mode = 0644;  // Read-write file
+		length = 0;   // Variable size
+#endif
+#if IS_ENABLED(CONFIG_MEMFAULT)
+	} else if (node == &mflt_node) {
+		name = "mflt";
+		mode = 0444;  // Read-only file
+		length = 0;   // Stream - size unknown
+#endif
 	} else {
 		return -EINVAL;
 	}
@@ -569,6 +872,66 @@ static int fs_stat(struct ninep_fs_node *node, uint8_t *buf, size_t buf_size,
 	return offset;
 }
 
+#if IS_ENABLED(CONFIG_NINEP_DFU)
+static int fs_clunk(struct ninep_fs_node *node, void *ctx)
+{
+	if (node == &firmware_node && dfu.state == DFU_RECEIVING) {
+		int ret;
+
+		dfu.state = DFU_FINALIZING;
+		LOG_INF("DFU: flushing buffer (%u bytes total)...", dfu.bytes_written);
+
+		/* Flush remaining buffered data */
+		ret = flash_img_buffered_write(&dfu.flash_ctx, NULL, 0, true);
+		if (ret < 0) {
+			LOG_ERR("Failed to flush final data: %d", ret);
+			dfu.state = DFU_ERROR;
+			dfu.last_error = ret;
+			return ret;
+		}
+
+		LOG_INF("DFU: validating image...");
+
+		/* Validate image header */
+		struct mcuboot_img_header hdr;
+		ret = boot_read_bank_header(FIXED_PARTITION_ID(slot1_partition),
+		                            &hdr, sizeof(hdr));
+		if (ret < 0) {
+			LOG_ERR("Failed to read image header: %d", ret);
+			dfu.state = DFU_ERROR;
+			dfu.last_error = ret;
+			return ret;
+		}
+
+		if (hdr.mcuboot_version != 1) {
+			LOG_ERR("Invalid MCUboot image version: %d", hdr.mcuboot_version);
+			dfu.state = DFU_ERROR;
+			dfu.last_error = -EINVAL;
+			return -EINVAL;
+		}
+
+		LOG_INF("DFU: image v%d.%d.%d+%d validated",
+		        hdr.h.v1.sem_ver.major,
+		        hdr.h.v1.sem_ver.minor,
+		        hdr.h.v1.sem_ver.revision,
+		        hdr.h.v1.sem_ver.build_num);
+
+		/* Mark for test upgrade */
+		ret = boot_request_upgrade(BOOT_UPGRADE_TEST);
+		if (ret < 0) {
+			LOG_ERR("Failed to mark image for upgrade: %d", ret);
+			dfu.state = DFU_ERROR;
+			dfu.last_error = ret;
+			return ret;
+		}
+
+		dfu.state = DFU_COMPLETE;
+		LOG_INF("DFU: complete - reboot to apply");
+	}
+	return 0;
+}
+#endif
+
 static const struct ninep_fs_ops kbd_fs_ops = {
 	.get_root = fs_get_root,
 	.walk = fs_walk,
@@ -578,6 +941,11 @@ static const struct ninep_fs_ops kbd_fs_ops = {
 	.stat = fs_stat,
 	.create = NULL,
 	.remove = NULL,
+#if IS_ENABLED(CONFIG_NINEP_DFU)
+	.clunk = fs_clunk,
+#else
+	.clunk = NULL,
+#endif
 };
 
 /* 9P server and transport */
@@ -585,10 +953,25 @@ static struct ninep_server kbd_server;
 static struct ninep_transport kbd_transport;
 static uint8_t rx_buf[CONFIG_NINEP_MAX_MESSAGE_SIZE];
 
-/* BLE advertising */
+/* BLE advertising data (31 bytes with 9PIS - exactly at limit) */
+#define BLE_SHORT_NAME "M2KB"
+#define BLE_FULL_NAME "FRST Model 2 Keyboard"
+
 static const struct bt_data ad[] = {
 	BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
-	BT_DATA_BYTES(BT_DATA_UUID16_ALL, 0x01, 0x10),  // Custom 9P service UUID (0x1001 little-endian)
+	BT_DATA_BYTES(BT_DATA_UUID16_ALL, 0x01, 0x10),  // 0x1001 for ESP32 discovery
+#if IS_ENABLED(CONFIG_NINEP_GATT_9PIS)
+	/* 9PIS service UUID: 39500001-feed-4a91-ba88-a1e0f6e4c001 (little-endian) */
+	BT_DATA_BYTES(BT_DATA_UUID128_ALL,
+		0x01, 0xc0, 0xe4, 0xf6, 0xe0, 0xa1, 0x88, 0xba,
+		0x91, 0x4a, 0xed, 0xfe, 0x01, 0x00, 0x50, 0x39),
+#endif
+	BT_DATA(BT_DATA_NAME_SHORTENED, BLE_SHORT_NAME, sizeof(BLE_SHORT_NAME) - 1),
+};
+
+/* Scan response data - full device name */
+static const struct bt_data sd[] = {
+	BT_DATA(BT_DATA_NAME_COMPLETE, BLE_FULL_NAME, sizeof(BLE_FULL_NAME) - 1),
 };
 
 static void connected(struct bt_conn *conn, uint8_t err)
@@ -696,6 +1079,24 @@ int kbd_9p_server_init(void)
 	}
 	LOG_INF("Bluetooth initialized");
 
+#if IS_ENABLED(CONFIG_NINEP_GATT_9PIS)
+	/* Initialize 9P Information Service (for iOS discovery) */
+	static const struct ninep_9pis_config ninepisconfig = {
+		.service_description = "9P Keyboard",
+		.service_features = "keyboard,leds,dfu,battery,mflt",
+		.transport_info = "l2cap:psm=0x0081",
+		.app_store_link = "",
+		.protocol_version = "9P2000;9p4z;1.0.0",
+	};
+	ret = ninep_9pis_init(&ninepisconfig);
+	if (ret) {
+		LOG_WRN("9PIS init failed (err %d) - iOS discovery may not work", ret);
+		/* Continue anyway - 9PIS is optional */
+	} else {
+		LOG_INF("9PIS GATT service registered");
+	}
+#endif
+
 	/* Initialize L2CAP transport */
 	struct ninep_transport_l2cap_config l2cap_config = {
 		.psm = CONFIG_NINEP_L2CAP_PSM,
@@ -731,8 +1132,8 @@ int kbd_9p_server_init(void)
 	}
 	LOG_INF("9P server started");
 
-	/* Start BLE advertising */
-	ret = bt_le_adv_start(BT_LE_ADV_CONN_NAME, ad, ARRAY_SIZE(ad), NULL, 0);
+	/* Start BLE advertising (name in scan response to fit both UUIDs in adv packet) */
+	ret = bt_le_adv_start(BT_LE_ADV_CONN, ad, ARRAY_SIZE(ad), sd, ARRAY_SIZE(sd));
 	if (ret) {
 		LOG_ERR("Advertising failed to start (err %d)", ret);
 		return ret;
@@ -821,7 +1222,7 @@ static int cmd_kbd9p_advertise(const struct shell *sh, size_t argc, char **argv)
 	}
 
 	/* Restart advertising */
-	ret = bt_le_adv_start(BT_LE_ADV_CONN_NAME, ad, ARRAY_SIZE(ad), NULL, 0);
+	ret = bt_le_adv_start(BT_LE_ADV_CONN, ad, ARRAY_SIZE(ad), sd, ARRAY_SIZE(sd));
 	if (ret) {
 		shell_error(sh, "Failed to start advertising: %d", ret);
 		return ret;
