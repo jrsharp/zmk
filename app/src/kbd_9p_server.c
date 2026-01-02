@@ -36,6 +36,19 @@
 #include <memfault/core/data_packetizer.h>
 #endif
 
+/* Version info from build system */
+#include <app_version.h>
+#include <version.h>
+#include <zephyr/drivers/hwinfo.h>
+
+/* FRST firmware version - override with -DFRST_FW_VERSION at build time */
+#ifndef FRST_FW_VERSION
+#define FRST_FW_VERSION "0.1.0-beta.1"
+#endif
+#define FRST_PRODUCT "FRST-M2KB"
+
+/* Use Zephyr's STRINGIFY macro from toolchain/common.h (included via kernel.h) */
+
 LOG_MODULE_REGISTER(kbd_9p, CONFIG_ZMK_LOG_LEVEL);
 
 /* Battery sensor device */
@@ -391,6 +404,11 @@ static struct ninep_fs_node ctl_node = {
 	.qid = {.type = NINEP_QTFILE, .version = 0, .path = 5},
 };
 
+/* Version info node */
+static struct ninep_fs_node version_node = {
+	.qid = {.type = NINEP_QTFILE, .version = 0, .path = 9},
+};
+
 /* /dev directory - exists when DFU or Memfault is enabled */
 #if IS_ENABLED(CONFIG_NINEP_DFU) || IS_ENABLED(CONFIG_MEMFAULT)
 static struct ninep_fs_node dev_node = {
@@ -442,6 +460,10 @@ static struct ninep_fs_node *fs_walk(struct ninep_fs_node *parent,
 		if (name_len == 3 && strncmp(name, "ctl", 3) == 0) {
 			printk("[9P] WALK -> ctl\n");
 			return &ctl_node;
+		}
+		if (name_len == 7 && strncmp(name, "version", 7) == 0) {
+			printk("[9P] WALK -> version\n");
+			return &version_node;
 		}
 #if IS_ENABLED(CONFIG_NINEP_DFU) || IS_ENABLED(CONFIG_MEMFAULT)
 		if (name_len == 3 && strncmp(name, "dev", 3) == 0) {
@@ -609,6 +631,57 @@ static int fs_read(struct ninep_fs_node *node, uint64_t offset,
 		size_t len = strlen(help);
 		size_t to_copy = MIN(len, (size_t)count);
 		memcpy(buf, help, to_copy);
+		return to_copy;
+	}
+
+	if (node == &version_node) {
+		/* Read firmware version info */
+		if (offset > 0) {
+			return 0;  /* Already read */
+		}
+
+		char info[384];
+		int len = 0;
+
+		/* Product identifier */
+		len += snprintf(info + len, sizeof(info) - len,
+		                "product %s\n", FRST_PRODUCT);
+
+		/* Firmware version */
+		len += snprintf(info + len, sizeof(info) - len,
+		                "version %s\n", FRST_FW_VERSION);
+
+		/* Git build info from Zephyr build system */
+#ifdef APP_BUILD_VERSION
+		len += snprintf(info + len, sizeof(info) - len,
+		                "build %s\n", STRINGIFY(APP_BUILD_VERSION));
+#endif
+
+		/* Zephyr kernel version */
+		len += snprintf(info + len, sizeof(info) - len,
+		                "zephyr %s\n", KERNEL_VERSION_STRING);
+
+		/* ZMK app version */
+		len += snprintf(info + len, sizeof(info) - len,
+		                "zmk %s\n", APP_VERSION_STRING);
+
+		/* Device serial from chip ID */
+		uint8_t hwid[8];
+		ssize_t hwid_len = hwinfo_get_device_id(hwid, sizeof(hwid));
+		if (hwid_len > 0) {
+			len += snprintf(info + len, sizeof(info) - len,
+			                "serial %02X%02X%02X%02X\n",
+			                hwid[0], hwid[1],
+			                hwid[hwid_len > 2 ? 2 : 0],
+			                hwid[hwid_len > 3 ? 3 : 0]);
+		}
+
+		/* Uptime in seconds */
+		len += snprintf(info + len, sizeof(info) - len,
+		                "uptime %lld\n", k_uptime_get() / 1000);
+
+		size_t to_copy = MIN((size_t)len, (size_t)count);
+		memcpy(buf, info, to_copy);
 		return to_copy;
 	}
 
@@ -835,6 +908,10 @@ static int fs_stat(struct ninep_fs_node *node, uint8_t *buf, size_t buf_size,
 		name = "ctl";
 		mode = 0644;  // Read-write file
 		length = 32;  // Help text length
+	} else if (node == &version_node) {
+		name = "version";
+		mode = 0444;  // Read-only file
+		length = 256; // Version info text
 #if IS_ENABLED(CONFIG_NINEP_DFU) || IS_ENABLED(CONFIG_MEMFAULT)
 	} else if (node == &dev_node) {
 		name = "dev";
