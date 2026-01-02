@@ -1,5 +1,6 @@
 /*
- * Copyright (c) 2025 FRST Keyboard Contributors
+ * Copyright (c) 2025 Jon Sharp
+ * Co-authored by Claude (Anthropic)
  * SPDX-License-Identifier: MIT
  */
 

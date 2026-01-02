@@ -88,6 +88,7 @@ if ((NOT CONFIG_ZMK_SPLIT) OR CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
 
   # 9P keyboard server (when not using ZMK_BLE)
   target_sources_ifdef(CONFIG_NINEP_SERVER app PRIVATE src/kbd_9p_server.c)
+  target_sources_ifdef(CONFIG_NINEP_SERVER app PRIVATE src/frst_settings.c)
 endif()
 
 # Memfault platform support

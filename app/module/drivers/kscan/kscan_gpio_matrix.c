@@ -17,6 +17,7 @@
 #include <zephyr/sys/util.h>
 
 #include <zmk/debounce.h>
+#include <zmk/kscan_settings.h>
 
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
@@ -83,6 +84,9 @@ struct kscan_matrix_data {
      * (config->rows * config->cols)
      */
     struct zmk_debounce_state *matrix_state;
+    /** Runtime-modifiable debounce settings (initialized from config) */
+    struct zmk_debounce_config runtime_debounce_config;
+    int32_t runtime_debounce_scan_period_ms;
 };
 
 struct kscan_matrix_config {
@@ -192,10 +196,9 @@ static void kscan_matrix_irq_callback_handler(const struct device *port, struct 
 #endif
 
 static void kscan_matrix_read_continue(const struct device *dev) {
-    const struct kscan_matrix_config *config = dev->config;
     struct kscan_matrix_data *data = dev->data;
 
-    data->scan_time += config->debounce_scan_period_ms;
+    data->scan_time += data->runtime_debounce_scan_period_ms;
 
     k_work_reschedule(&data->work, K_TIMEOUT_ABS_MS(data->scan_time));
 }
@@ -244,8 +247,9 @@ static int kscan_matrix_read(const struct device *dev) {
                 return active;
             }
 
-            zmk_debounce_update(&data->matrix_state[index], active, config->debounce_scan_period_ms,
-                                &config->debounce_config);
+            zmk_debounce_update(&data->matrix_state[index], active,
+                                data->runtime_debounce_scan_period_ms,
+                                &data->runtime_debounce_config);
         }
 
         err = gpio_pin_set_dt(&out_gpio->spec, 0);
@@ -445,8 +449,13 @@ static void kscan_matrix_setup_pins(const struct device *dev) {
 
 static int kscan_matrix_init(const struct device *dev) {
     struct kscan_matrix_data *data = dev->data;
+    const struct kscan_matrix_config *config = dev->config;
 
     data->dev = dev;
+
+    // Initialize runtime-modifiable debounce settings from const config
+    data->runtime_debounce_config = config->debounce_config;
+    data->runtime_debounce_scan_period_ms = config->debounce_scan_period_ms;
 
     // Sort inputs by port so we can read each port just once per scan.
     kscan_gpio_list_sort_by_port(&data->inputs);
@@ -491,6 +500,61 @@ static const struct kscan_driver_api kscan_matrix_api = {
     .enable_callback = kscan_matrix_enable,
     .disable_callback = kscan_matrix_disable,
 };
+
+/* Runtime debounce settings API */
+int zmk_kscan_matrix_get_debounce_press_ms(const struct device *dev, uint32_t *ms) {
+    if (!dev || !ms) {
+        return -EINVAL;
+    }
+    struct kscan_matrix_data *data = dev->data;
+    *ms = data->runtime_debounce_config.debounce_press_ms;
+    return 0;
+}
+
+int zmk_kscan_matrix_set_debounce_press_ms(const struct device *dev, uint32_t ms) {
+    if (!dev || ms > DEBOUNCE_COUNTER_MAX) {
+        return -EINVAL;
+    }
+    struct kscan_matrix_data *data = dev->data;
+    data->runtime_debounce_config.debounce_press_ms = ms;
+    return 0;
+}
+
+int zmk_kscan_matrix_get_debounce_release_ms(const struct device *dev, uint32_t *ms) {
+    if (!dev || !ms) {
+        return -EINVAL;
+    }
+    struct kscan_matrix_data *data = dev->data;
+    *ms = data->runtime_debounce_config.debounce_release_ms;
+    return 0;
+}
+
+int zmk_kscan_matrix_set_debounce_release_ms(const struct device *dev, uint32_t ms) {
+    if (!dev || ms > DEBOUNCE_COUNTER_MAX) {
+        return -EINVAL;
+    }
+    struct kscan_matrix_data *data = dev->data;
+    data->runtime_debounce_config.debounce_release_ms = ms;
+    return 0;
+}
+
+int zmk_kscan_matrix_get_debounce_scan_period_ms(const struct device *dev, int32_t *ms) {
+    if (!dev || !ms) {
+        return -EINVAL;
+    }
+    struct kscan_matrix_data *data = dev->data;
+    *ms = data->runtime_debounce_scan_period_ms;
+    return 0;
+}
+
+int zmk_kscan_matrix_set_debounce_scan_period_ms(const struct device *dev, int32_t ms) {
+    if (!dev || ms < 1) {
+        return -EINVAL;
+    }
+    struct kscan_matrix_data *data = dev->data;
+    data->runtime_debounce_scan_period_ms = ms;
+    return 0;
+}
 
 #define KSCAN_MATRIX_INIT(n)                                                                       \
     BUILD_ASSERT(INST_DEBOUNCE_PRESS_MS(n) <= DEBOUNCE_COUNTER_MAX,                                \

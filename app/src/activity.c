@@ -42,10 +42,42 @@ static enum zmk_activity_state activity_state;
 
 static uint32_t activity_last_uptime;
 
-#define MAX_IDLE_MS CONFIG_ZMK_IDLE_TIMEOUT
+/* Runtime-modifiable idle settings (initialized from Kconfig) */
+static uint32_t idle_timeout_ms = CONFIG_ZMK_IDLE_TIMEOUT;
 
 #if IS_ENABLED(CONFIG_ZMK_SLEEP)
-#define MAX_SLEEP_MS CONFIG_ZMK_IDLE_SLEEP_TIMEOUT
+static uint32_t sleep_timeout_ms = CONFIG_ZMK_IDLE_SLEEP_TIMEOUT;
+#endif
+
+/* Getters and setters for runtime idle settings */
+uint32_t zmk_activity_get_idle_timeout_ms(void) {
+    return idle_timeout_ms;
+}
+
+void zmk_activity_set_idle_timeout_ms(uint32_t timeout_ms) {
+    idle_timeout_ms = timeout_ms;
+}
+
+#if IS_ENABLED(CONFIG_ZMK_SLEEP)
+uint32_t zmk_activity_get_sleep_timeout_ms(void) {
+    return sleep_timeout_ms;
+}
+
+void zmk_activity_set_sleep_timeout_ms(uint32_t timeout_ms) {
+    sleep_timeout_ms = timeout_ms;
+}
+
+bool zmk_activity_get_sleep_enabled(void) {
+    return sleep_timeout_ms > 0;
+}
+
+void zmk_activity_set_sleep_enabled(bool enabled) {
+    if (!enabled) {
+        sleep_timeout_ms = 0;
+    } else if (sleep_timeout_ms == 0) {
+        sleep_timeout_ms = CONFIG_ZMK_IDLE_SLEEP_TIMEOUT;
+    }
+}
 #endif
 
 int raise_event(void) {
@@ -75,7 +107,7 @@ void activity_work_handler(struct k_work *work) {
     int32_t current = k_uptime_get();
     int32_t inactive_time = current - activity_last_uptime;
 #if IS_ENABLED(CONFIG_ZMK_SLEEP)
-    if (inactive_time > MAX_SLEEP_MS && !is_usb_power_present()) {
+    if (sleep_timeout_ms > 0 && inactive_time > sleep_timeout_ms && !is_usb_power_present()) {
         // Put devices in suspend power mode before sleeping
         set_state(ZMK_ACTIVITY_SLEEP);
 
@@ -88,7 +120,7 @@ void activity_work_handler(struct k_work *work) {
         sys_poweroff();
     } else
 #endif /* IS_ENABLED(CONFIG_ZMK_SLEEP) */
-        if (inactive_time > MAX_IDLE_MS) {
+        if (idle_timeout_ms > 0 && inactive_time > idle_timeout_ms) {
             set_state(ZMK_ACTIVITY_IDLE);
         }
 }

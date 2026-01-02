@@ -1,9 +1,10 @@
 /*
- * Copyright (c) 2025 ZMK Contributors
+ * Copyright (c) 2025 Jon Sharp
+ * Co-authored by Claude (Anthropic)
  * SPDX-License-Identifier: MIT
  *
  * 9P Keyboard Server Implementation
- * Exposes /kbd/kbin (PS/2 scan codes) and /kbd/leds (LED control)
+ * Exposes keyboard I/O, settings, and device management via 9P filesystem
  */
 
 #include <zephyr/kernel.h>
@@ -41,6 +42,11 @@
 #include <version.h>
 #include <zephyr/drivers/hwinfo.h>
 
+/* Runtime settings APIs */
+#include <zmk/activity.h>
+#include <zmk/kscan_settings.h>
+#include <frst_settings.h>
+
 /* FRST firmware version - override with -DFRST_FW_VERSION at build time */
 #ifndef FRST_FW_VERSION
 #define FRST_FW_VERSION "0.1.0-beta.1"
@@ -56,6 +62,13 @@ LOG_MODULE_REGISTER(kbd_9p, CONFIG_ZMK_LOG_LEVEL);
 static const struct device *const battery_dev = DEVICE_DT_GET(DT_CHOSEN(zmk_battery));
 #else
 static const struct device *const battery_dev = NULL;
+#endif
+
+/* Kscan device for debounce settings */
+#if DT_HAS_CHOSEN(zmk_kscan)
+static const struct device *const kscan_dev = DEVICE_DT_GET(DT_CHOSEN(zmk_kscan));
+#else
+static const struct device *const kscan_dev = NULL;
 #endif
 
 /* Status LED - nice!nano blue LED on P0.15 */
@@ -409,6 +422,17 @@ static struct ninep_fs_node version_node = {
 	.qid = {.type = NINEP_QTFILE, .version = 0, .path = 9},
 };
 
+/* Settings directory and nodes */
+static struct ninep_fs_node settings_node = {
+	.qid = {.type = NINEP_QTDIR, .version = 0, .path = 10},
+};
+static struct ninep_fs_node debounce_node = {
+	.qid = {.type = NINEP_QTFILE, .version = 0, .path = 11},
+};
+static struct ninep_fs_node idle_node = {
+	.qid = {.type = NINEP_QTFILE, .version = 0, .path = 12},
+};
+
 /* /dev directory - exists when DFU or Memfault is enabled */
 #if IS_ENABLED(CONFIG_NINEP_DFU) || IS_ENABLED(CONFIG_MEMFAULT)
 static struct ninep_fs_node dev_node = {
@@ -465,6 +489,10 @@ static struct ninep_fs_node *fs_walk(struct ninep_fs_node *parent,
 			printk("[9P] WALK -> version\n");
 			return &version_node;
 		}
+		if (name_len == 8 && strncmp(name, "settings", 8) == 0) {
+			printk("[9P] WALK -> settings\n");
+			return &settings_node;
+		}
 #if IS_ENABLED(CONFIG_NINEP_DFU) || IS_ENABLED(CONFIG_MEMFAULT)
 		if (name_len == 3 && strncmp(name, "dev", 3) == 0) {
 			printk("[9P] WALK -> dev\n");
@@ -472,6 +500,20 @@ static struct ninep_fs_node *fs_walk(struct ninep_fs_node *parent,
 		}
 #endif
 		printk("[9P] WALK fail - unknown: %.*s\n", name_len, name);
+		return NULL;
+	}
+
+	/* Walk from /settings */
+	if (parent == &settings_node) {
+		if (name_len == 8 && strncmp(name, "debounce", 8) == 0) {
+			printk("[9P] WALK -> settings/debounce\n");
+			return &debounce_node;
+		}
+		if (name_len == 4 && strncmp(name, "idle", 4) == 0) {
+			printk("[9P] WALK -> settings/idle\n");
+			return &idle_node;
+		}
+		printk("[9P] WALK fail - unknown in settings: %.*s\n", name_len, name);
 		return NULL;
 	}
 
@@ -685,6 +727,66 @@ static int fs_read(struct ninep_fs_node *node, uint64_t offset,
 		return to_copy;
 	}
 
+	if (node == &debounce_node) {
+		/* Read debounce settings */
+		if (offset > 0) {
+			return 0;
+		}
+
+		char info[128];
+		int len = 0;
+
+		if (kscan_dev) {
+			uint32_t press_ms, release_ms;
+			int32_t scan_ms;
+			zmk_kscan_matrix_get_debounce_press_ms(kscan_dev, &press_ms);
+			zmk_kscan_matrix_get_debounce_release_ms(kscan_dev, &release_ms);
+			zmk_kscan_matrix_get_debounce_scan_period_ms(kscan_dev, &scan_ms);
+
+			len += snprintf(info + len, sizeof(info) - len,
+			                "press_ms %u\n", press_ms);
+			len += snprintf(info + len, sizeof(info) - len,
+			                "release_ms %u\n", release_ms);
+			len += snprintf(info + len, sizeof(info) - len,
+			                "scan_period_ms %d\n", scan_ms);
+		} else {
+			len += snprintf(info + len, sizeof(info) - len,
+			                "error no_kscan_device\n");
+		}
+
+		size_t to_copy = MIN((size_t)len, (size_t)count);
+		memcpy(buf, info, to_copy);
+		return to_copy;
+	}
+
+	if (node == &idle_node) {
+		/* Read idle/sleep settings */
+		if (offset > 0) {
+			return 0;
+		}
+
+		char info[128];
+		int len = 0;
+
+		len += snprintf(info + len, sizeof(info) - len,
+		                "idle_timeout_ms %u\n", zmk_activity_get_idle_timeout_ms());
+
+#if IS_ENABLED(CONFIG_ZMK_SLEEP)
+		len += snprintf(info + len, sizeof(info) - len,
+		                "sleep_timeout_ms %u\n", zmk_activity_get_sleep_timeout_ms());
+		len += snprintf(info + len, sizeof(info) - len,
+		                "sleep_enabled %s\n",
+		                zmk_activity_get_sleep_enabled() ? "true" : "false");
+#else
+		len += snprintf(info + len, sizeof(info) - len,
+		                "sleep_enabled false\n");
+#endif
+
+		size_t to_copy = MIN((size_t)len, (size_t)count);
+		memcpy(buf, info, to_copy);
+		return to_copy;
+	}
+
 #if IS_ENABLED(CONFIG_NINEP_DFU)
 	if (node == &firmware_node) {
 		/* Read firmware status */
@@ -817,6 +919,101 @@ static int fs_write(struct ninep_fs_node *node, uint64_t offset,
 		return -EINVAL;
 	}
 
+	if (node == &debounce_node) {
+		/* Parse and apply debounce settings */
+		/* Format: "key value\n" e.g., "press_ms 5" */
+		if (!kscan_dev) {
+			return -ENODEV;
+		}
+
+		char cmd[64];
+		size_t cmd_len = MIN(count, sizeof(cmd) - 1);
+		memcpy(cmd, buf, cmd_len);
+		cmd[cmd_len] = '\0';
+
+		/* Strip trailing newline */
+		if (cmd_len > 0 && cmd[cmd_len - 1] == '\n') {
+			cmd[cmd_len - 1] = '\0';
+		}
+
+		char *space = strchr(cmd, ' ');
+		if (!space) {
+			return -EINVAL;
+		}
+		*space = '\0';
+		const char *key = cmd;
+		uint32_t value = strtoul(space + 1, NULL, 10);
+
+		if (strcmp(key, "press_ms") == 0) {
+			zmk_kscan_matrix_set_debounce_press_ms(kscan_dev, value);
+			frst_settings_save_debounce_press_ms(value);
+			LOG_INF("Set debounce press_ms = %u (saved)", value);
+		} else if (strcmp(key, "release_ms") == 0) {
+			zmk_kscan_matrix_set_debounce_release_ms(kscan_dev, value);
+			frst_settings_save_debounce_release_ms(value);
+			LOG_INF("Set debounce release_ms = %u (saved)", value);
+		} else if (strcmp(key, "scan_period_ms") == 0) {
+			zmk_kscan_matrix_set_debounce_scan_period_ms(kscan_dev, (int32_t)value);
+			frst_settings_save_debounce_scan_period_ms((int32_t)value);
+			LOG_INF("Set debounce scan_period_ms = %u (saved)", value);
+		} else {
+			LOG_WRN("Unknown debounce key: %s", key);
+			return -EINVAL;
+		}
+
+		return count;
+	}
+
+	if (node == &idle_node) {
+		/* Parse and apply idle settings */
+		/* Format: "key value\n" e.g., "idle_timeout_ms 60000" */
+		char cmd[64];
+		size_t cmd_len = MIN(count, sizeof(cmd) - 1);
+		memcpy(cmd, buf, cmd_len);
+		cmd[cmd_len] = '\0';
+
+		/* Strip trailing newline */
+		if (cmd_len > 0 && cmd[cmd_len - 1] == '\n') {
+			cmd[cmd_len - 1] = '\0';
+		}
+
+		char *space = strchr(cmd, ' ');
+		if (!space) {
+			return -EINVAL;
+		}
+		*space = '\0';
+		const char *key = cmd;
+		const char *val_str = space + 1;
+
+		if (strcmp(key, "idle_timeout_ms") == 0) {
+			uint32_t value = strtoul(val_str, NULL, 10);
+			zmk_activity_set_idle_timeout_ms(value);
+			frst_settings_save_idle_timeout_ms(value);
+			LOG_INF("Set idle_timeout_ms = %u (saved)", value);
+		}
+#if IS_ENABLED(CONFIG_ZMK_SLEEP)
+		else if (strcmp(key, "sleep_timeout_ms") == 0) {
+			uint32_t value = strtoul(val_str, NULL, 10);
+			zmk_activity_set_sleep_timeout_ms(value);
+			frst_settings_save_sleep_timeout_ms(value);
+			LOG_INF("Set sleep_timeout_ms = %u (saved)", value);
+		} else if (strcmp(key, "sleep_enabled") == 0) {
+			bool enabled = (strcmp(val_str, "true") == 0 || strcmp(val_str, "1") == 0);
+			zmk_activity_set_sleep_enabled(enabled);
+			/* Save as timeout value: 0 = disabled, default = enabled */
+			frst_settings_save_sleep_timeout_ms(
+				enabled ? CONFIG_ZMK_IDLE_SLEEP_TIMEOUT : 0);
+			LOG_INF("Set sleep_enabled = %s (saved)", enabled ? "true" : "false");
+		}
+#endif
+		else {
+			LOG_WRN("Unknown idle key: %s", key);
+			return -EINVAL;
+		}
+
+		return count;
+	}
+
 #if IS_ENABLED(CONFIG_NINEP_DFU)
 	if (node == &firmware_node) {
 		int ret;
@@ -912,6 +1109,18 @@ static int fs_stat(struct ninep_fs_node *node, uint8_t *buf, size_t buf_size,
 		name = "version";
 		mode = 0444;  // Read-only file
 		length = 256; // Version info text
+	} else if (node == &settings_node) {
+		name = "settings";
+		mode = 0x80000000 | 0755;  // Directory
+		length = 0;
+	} else if (node == &debounce_node) {
+		name = "debounce";
+		mode = 0644;  // Read-write file
+		length = 64;  // Settings text
+	} else if (node == &idle_node) {
+		name = "idle";
+		mode = 0644;  // Read-write file
+		length = 128; // Settings text
 #if IS_ENABLED(CONFIG_NINEP_DFU) || IS_ENABLED(CONFIG_MEMFAULT)
 	} else if (node == &dev_node) {
 		name = "dev";
