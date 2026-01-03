@@ -1,0 +1,6 @@
+if SHIELD_CHOCV_HOGP_TEST
+
+config ZMK_KEYBOARD_NAME
+	default "ChocV HOGP Test"
+
+endif
