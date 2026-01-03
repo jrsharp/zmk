@@ -1,0 +1,14 @@
+/*
+ * Copyright (c) 2025 Jon Sharp
+ * Co-authored by Claude (Anthropic)
+ * SPDX-License-Identifier: MIT
+ *
+ * Board-specific overlay for nice!nano v2 with FRST Corne shield.
+ * Configures battery monitoring via VDDH ADC.
+ */
+
+/ {
+    chosen {
+        zmk,battery = &vbatt;
+    };
+};

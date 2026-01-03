@@ -1,0 +1,53 @@
+/*
+ * Copyright (c) 2025 Jon Sharp
+ * Co-authored by Claude (Anthropic)
+ * SPDX-License-Identifier: MIT
+ */
+
+#include "corne_frst.dtsi"
+
+/ {
+    /* Alias for the nice!nano blue LED (P0.15) */
+    aliases {
+        led0 = &blue_led;
+    };
+
+    /* Wired split via TRRS cable using UART */
+    wired_split {
+        compatible = "zmk,wired-split";
+        device = <&pro_micro_serial>;
+    };
+};
+
+&kscan0 {
+    col-gpios
+        = <&pro_micro 21 GPIO_ACTIVE_HIGH>
+        , <&pro_micro 20 GPIO_ACTIVE_HIGH>
+        , <&pro_micro 19 GPIO_ACTIVE_HIGH>
+        , <&pro_micro 18 GPIO_ACTIVE_HIGH>
+        , <&pro_micro 15 GPIO_ACTIVE_HIGH>
+        , <&pro_micro 14 GPIO_ACTIVE_HIGH>
+        ;
+};
+
+&pro_micro_serial {
+    status = "okay";
+};
+
+/*
+ * USB CDC ACM console configuration
+ */
+/ {
+    chosen {
+        zephyr,console = &cdc_acm_uart;
+        zephyr,shell-uart = &cdc_acm_uart;
+    };
+};
+
+&zephyr_udc0 {
+    cdc_acm_uart: cdc_acm_uart {
+        compatible = "zephyr,cdc-acm-uart";
+    };
+};
+
+/* Uses stock nice!nano UF2 bootloader flash layout */
