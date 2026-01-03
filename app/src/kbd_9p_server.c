@@ -1239,9 +1239,17 @@ static struct ninep_server kbd_server;
 static struct ninep_transport kbd_transport;
 static uint8_t rx_buf[CONFIG_NINEP_MAX_MESSAGE_SIZE];
 
-/* BLE advertising data (31 bytes with 9PIS - exactly at limit) */
-#define BLE_SHORT_NAME "M2KB"
-#define BLE_FULL_NAME "FRST Model 2 Keyboard"
+/* BLE advertising - dynamic name with MAC suffix for 1:1 terminal pairing */
+#ifdef CONFIG_ZMK_KEYBOARD_NAME
+#define BLE_BASE_NAME CONFIG_ZMK_KEYBOARD_NAME
+#else
+#define BLE_BASE_NAME "FRST-KB"
+#endif
+
+/* Buffer for dynamic device name: "FRST-M1KB-A3F2" (base + "-" + 4 hex chars + null) */
+#define BLE_NAME_MAX_LEN 32
+static char ble_device_name[BLE_NAME_MAX_LEN];
+static uint8_t ble_device_name_len;
 
 static const struct bt_data ad[] = {
 	BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
@@ -1252,13 +1260,11 @@ static const struct bt_data ad[] = {
 		0x01, 0xc0, 0xe4, 0xf6, 0xe0, 0xa1, 0x88, 0xba,
 		0x91, 0x4a, 0xed, 0xfe, 0x01, 0x00, 0x50, 0x39),
 #endif
-	BT_DATA(BT_DATA_NAME_SHORTENED, BLE_SHORT_NAME, sizeof(BLE_SHORT_NAME) - 1),
+	/* Short name omitted - full name with MAC suffix in scan response */
 };
 
-/* Scan response data - full device name */
-static const struct bt_data sd[] = {
-	BT_DATA(BT_DATA_NAME_COMPLETE, BLE_FULL_NAME, sizeof(BLE_FULL_NAME) - 1),
-};
+/* Scan response data - built dynamically with MAC suffix */
+static struct bt_data sd[1];
 
 static void connected(struct bt_conn *conn, uint8_t err)
 {
@@ -1364,6 +1370,36 @@ int kbd_9p_server_init(void)
 		return ret;
 	}
 	LOG_INF("Bluetooth initialized");
+
+	/* Build device name with MAC suffix for unique identification */
+	{
+		bt_addr_le_t addrs[1];
+		size_t count = 1;
+
+		bt_id_get(addrs, &count);
+		if (count > 0) {
+			/* Format: "FRST-M1KB-A3F2" (base name + last 2 bytes of MAC) */
+			ble_device_name_len = snprintf(ble_device_name, BLE_NAME_MAX_LEN,
+				"%s-%02X%02X",
+				BLE_BASE_NAME,
+				addrs[0].a.val[1],
+				addrs[0].a.val[0]);
+			LOG_INF("Device name: %s (MAC: %02X:%02X:%02X:%02X:%02X:%02X)",
+				ble_device_name,
+				addrs[0].a.val[5], addrs[0].a.val[4], addrs[0].a.val[3],
+				addrs[0].a.val[2], addrs[0].a.val[1], addrs[0].a.val[0]);
+		} else {
+			/* Fallback if no address available */
+			ble_device_name_len = snprintf(ble_device_name, BLE_NAME_MAX_LEN,
+				"%s", BLE_BASE_NAME);
+			LOG_WRN("No BLE address available, using base name: %s", ble_device_name);
+		}
+
+		/* Set up scan response with dynamic name */
+		sd[0].type = BT_DATA_NAME_COMPLETE;
+		sd[0].data_len = ble_device_name_len;
+		sd[0].data = ble_device_name;
+	}
 
 #if IS_ENABLED(CONFIG_NINEP_GATT_9PIS)
 	/* Initialize 9P Information Service (for iOS discovery) */
