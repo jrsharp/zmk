@@ -23,8 +23,10 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #include <zmk/workqueue.h>
 
 static uint8_t last_state_of_charge = 0;
+static uint16_t last_millivolts = 0;
 
 uint8_t zmk_battery_state_of_charge(void) { return last_state_of_charge; }
+uint16_t zmk_battery_millivolts(void) { return last_millivolts; }
 
 #if DT_HAS_CHOSEN(zmk_battery)
 static const struct device *const battery = DEVICE_DT_GET(DT_CHOSEN(zmk_battery));
@@ -68,6 +70,13 @@ static int zmk_battery_update(const struct device *battery) {
         LOG_DBG("Failed to get battery state of charge: %d", rc);
         return rc;
     }
+
+    /* Also fetch voltage for millivolt reporting */
+    struct sensor_value voltage;
+    if (sensor_sample_fetch_chan(battery, SENSOR_CHAN_GAUGE_VOLTAGE) == 0 &&
+        sensor_channel_get(battery, SENSOR_CHAN_GAUGE_VOLTAGE, &voltage) == 0) {
+        last_millivolts = voltage.val1 * 1000 + (voltage.val2 / 1000);
+    }
 #elif IS_ENABLED(CONFIG_ZMK_BATTERY_REPORTING_FETCH_MODE_LITHIUM_VOLTAGE)
     rc = sensor_sample_fetch_chan(battery, SENSOR_CHAN_VOLTAGE);
     if (rc != 0) {
@@ -84,6 +93,7 @@ static int zmk_battery_update(const struct device *battery) {
     }
 
     uint16_t mv = voltage.val1 * 1000 + (voltage.val2 / 1000);
+    last_millivolts = mv;
     state_of_charge.val1 = lithium_ion_mv_to_pct(mv);
 
     LOG_DBG("State of change %d from %d mv", state_of_charge.val1, mv);
@@ -95,7 +105,8 @@ static int zmk_battery_update(const struct device *battery) {
         last_state_of_charge = state_of_charge.val1;
 
         rc = raise_zmk_battery_state_changed(
-            (struct zmk_battery_state_changed){.state_of_charge = last_state_of_charge});
+            (struct zmk_battery_state_changed){.state_of_charge = last_state_of_charge,
+                                               .millivolts = last_millivolts});
 
         if (rc != 0) {
             LOG_ERR("Failed to raise battery state changed event: %d", rc);

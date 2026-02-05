@@ -7,3 +7,4 @@
 #pragma once
 
 uint8_t zmk_battery_state_of_charge(void);
+uint16_t zmk_battery_millivolts(void);

@@ -54,4 +54,19 @@ config ZMK_SPLIT_WIRED_HALF_DUPLEX_RX_TIMEOUT
 config ZMK_SPLIT_WIRED_HALF_DUPLEX_RX_COMPLETE_TIMEOUT
     int "RX complete timeout (in ticks) when polling peripheral(s) after receiving some response data"
 
+menuconfig ZMK_SPLIT_WIRED_CENTRAL_BATTERY_LEVEL_FETCHING
+    bool "Fetch Peripheral Battery Level Info"
+    depends on ZMK_SPLIT_ROLE_CENTRAL
+    help
+      Adds internal support for fetching the battery levels from wired
+      peripherals and generating events in the ZMK eventing system.
+
+if ZMK_SPLIT_WIRED_CENTRAL_BATTERY_LEVEL_FETCHING
+
+config ZMK_SPLIT_WIRED_CENTRAL_BATTERY_LEVEL_QUEUE_SIZE
+    int "Max number of battery level events to queue when received from peripherals"
+    default 1
+
+endif # ZMK_SPLIT_WIRED_CENTRAL_BATTERY_LEVEL_FETCHING
+
 endif
