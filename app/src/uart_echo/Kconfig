@@ -1,0 +1,20 @@
+# Copyright (c) 2025 Jon Sharp
+# Co-authored by Claude (Anthropic)
+# SPDX-License-Identifier: MIT
+
+config UART_ECHO_TEST
+    bool "UART Echo Test Module"
+    default n
+    select SERIAL
+    select UART_INTERRUPT_DRIVEN
+    help
+      Simple UART echo test for verifying bidirectional communication.
+      Echoes all received bytes back to the sender.
+      Used for Phase 2 testing before implementing full 9P protocol.
+
+config UART_ECHO_DEVICE
+    string "UART device for echo test"
+    default "uart0"
+    depends on UART_ECHO_TEST
+    help
+      The UART device name to use for echo testing.

@@ -82,7 +82,20 @@ RC(2,0) RC(2,1) RC(2,2) RC(2,3) RC(2,4)    RC(2,5) RC(2,6) RC(2,7) RC(2,8) RC(2,
 };
 
 /*
- * UART0 is pre-configured in rpi_pico board on GP0 (TX) / GP1 (RX)
- * Will be used for 9P protocol communication with ESP32-S3 terminal
- * Phase 1: USB HID only, UART reserved for later phases
+ * USB CDC ACM for console/debug output
+ * This keeps UART0 free for 9P communication with ESP32-S3
  */
+&zephyr_udc0 {
+    cdc_acm_uart: cdc_acm_uart {
+        compatible = "zephyr,cdc-acm-uart";
+    };
+};
+
+/*
+ * UART0 on GP0 (TX) / GP1 (RX) for 9P protocol
+ * Phase 2: Echo test, Phase 3+: Full 9P server
+ */
+&uart0 {
+    status = "okay";
+    current-speed = <115200>;
+};

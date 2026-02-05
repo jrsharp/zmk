@@ -608,6 +608,8 @@ endif # ZMK_USB_LOGGING || ZMK_RTT_LOGGING
 
 endmenu # Logging
 
+rsource "src/uart_echo/Kconfig"
+
 if SETTINGS
 
 config ZMK_SETTINGS_RESET_ON_START
