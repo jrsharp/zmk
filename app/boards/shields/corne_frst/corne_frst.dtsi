@@ -16,10 +16,16 @@
         compatible = "zmk,matrix-transform";
         columns = <12>;
         rows = <4>;
-// | SW1  | SW2  | SW3  | SW4  | SW5  | SW6  |   | SW6  | SW5  | SW4  | SW3  | SW2  | SW1  |
-// | SW7  | SW8  | SW9  | SW10 | SW11 | SW12 |   | SW12 | SW11 | SW10 | SW9  | SW8  | SW7  |
-// | SW13 | SW14 | SW15 | SW16 | SW17 | SW18 |   | SW18 | SW17 | SW16 | SW15 | SW14 | SW13 |
-//                      | SW19 | SW20 | SW21 |   | SW21 | SW20 | SW19 |
+// 42-key Corne layout with outer columns as app launchers
+//
+// | EDT |  Q  |  W  |  E  |  R  |  T  |   |  Y  |  U  |  I  |  O  |  P  | FIL |
+// | SHL |  A  |  S  |  D  |  F  |  G  |   |  H  |  J  |  K  |  L  |  ;  | COM |
+// | SET |  Z  |  X  |  C  |  V  |  B  |   |  N  |  M  |  ,  |  .  |  /  | HOM |
+//                   | CTL | BSP | SPC |   | ENT | DEL | L1  |
+//
+// Outer columns: App launchers (F13-F18)
+//   Left:  F13=Editor, F14=Shell, F15=Settings
+//   Right: F16=Files, F17=Comms, F18=Home
         map = <
 RC(0,0) RC(0,1) RC(0,2) RC(0,3) RC(0,4) RC(0,5)  RC(0,6) RC(0,7) RC(0,8) RC(0,9) RC(0,10) RC(0,11)
 RC(1,0) RC(1,1) RC(1,2) RC(1,3) RC(1,4) RC(1,5)  RC(1,6) RC(1,7) RC(1,8) RC(1,9) RC(1,10) RC(1,11)
