@@ -31,8 +31,7 @@ RC(2,0) RC(2,1) RC(2,2) RC(2,3) RC(2,4) RC(2,5) RC(2,6) RC(2,7) RC(2,8) RC(2,9)
         debounce-press-ms = <15>;
         debounce-release-ms = <15>;
         debounce-scan-period-ms = <1>;
-        /* Enable as wakeup source for deep sleep */
-        wakeup-source;
+        /* DISABLED FOR TEST: wakeup-source; */
 
         col-gpios
             = <&pro_micro 10 GPIO_ACTIVE_HIGH>
@@ -55,11 +54,12 @@ RC(2,0) RC(2,1) RC(2,2) RC(2,3) RC(2,4) RC(2,5) RC(2,6) RC(2,7) RC(2,8) RC(2,9)
             ;
     };
 
-    /* Deep sleep wakeup configuration - any keypress wakes */
+    /* DISABLED FOR TEST
     soft_off_wakers {
         compatible = "zmk,soft-off-wakeup-sources";
         wakeup-sources = <&kscan0>;
     };
+    */
 };
 /*
  * Copyright (c) 2025 ZMK Contributors
