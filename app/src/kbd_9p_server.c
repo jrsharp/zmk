@@ -47,6 +47,13 @@
 #include <zmk/kscan_settings.h>
 #include <frst_settings.h>
 
+/* Split keyboard battery support */
+#if IS_ENABLED(CONFIG_ZMK_SPLIT_WIRED_CENTRAL_BATTERY_LEVEL_FETCHING) || \
+    IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_CENTRAL_BATTERY_LEVEL_FETCHING)
+#include <zmk/split/central.h>
+#define SPLIT_BATTERY_SUPPORT 1
+#endif
+
 /* FRST firmware version - override with -DFRST_FW_VERSION at build time */
 #ifndef FRST_FW_VERSION
 #define FRST_FW_VERSION "0.1.0-beta.1"
@@ -81,6 +88,33 @@ static void status_led_set(bool on)
 		gpio_pin_set_dt(&status_led, on ? 1 : 0);
 	}
 }
+
+/* BLE advertising - dynamic name with MAC suffix for 1:1 terminal pairing */
+#ifdef CONFIG_ZMK_KEYBOARD_NAME
+#define BLE_BASE_NAME CONFIG_ZMK_KEYBOARD_NAME
+#else
+#define BLE_BASE_NAME "FRST-KB"
+#endif
+
+/* Buffer for dynamic device name: "FRST-M1KB-A3F2" (base + "-" + 4 hex chars + null) */
+#define BLE_NAME_MAX_LEN 32
+static char ble_device_name[BLE_NAME_MAX_LEN];
+static uint8_t ble_device_name_len;
+
+static const struct bt_data ad[] = {
+	BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
+	BT_DATA_BYTES(BT_DATA_UUID16_ALL, 0x01, 0x10),  /* 0x1001 for ESP32 discovery */
+#if IS_ENABLED(CONFIG_NINEP_GATT_9PIS)
+	/* 9PIS service UUID: 39500001-feed-4a91-ba88-a1e0f6e4c001 (little-endian) */
+	BT_DATA_BYTES(BT_DATA_UUID128_ALL,
+		0x01, 0xc0, 0xe4, 0xf6, 0xe0, 0xa1, 0x88, 0xba,
+		0x91, 0x4a, 0xed, 0xfe, 0x01, 0x00, 0x50, 0x39),
+#endif
+	/* Short name omitted - full name with MAC suffix in scan response */
+};
+
+/* Scan response data - built dynamically with MAC suffix */
+static struct bt_data sd[1];
 
 /* PS/2 Set 1 Scan Code Translation Table */
 /* Maps HID usage codes (page 0x07 - Keyboard) to PS/2 Set 1 scan codes */
@@ -460,6 +494,9 @@ static struct ninep_fs_node *fs_get_root(void *ctx)
 	kbd_root_node.qid.version = 0;
 	kbd_root_node.qid.path = 1;
 
+	printk("[9P] GET_ROOT: returning node=%p qid.type=%u qid.path=%llu\n",
+	       &kbd_root_node, kbd_root_node.qid.type, kbd_root_node.qid.path);
+
 	return &kbd_root_node;
 }
 
@@ -467,6 +504,9 @@ static struct ninep_fs_node *fs_walk(struct ninep_fs_node *parent,
                                       const char *name, uint16_t name_len,
                                       void *ctx)
 {
+	printk("[9P] WALK: parent=%p (root=%p) name='%.*s' len=%u\n",
+	       parent, &kbd_root_node, name_len, name, name_len);
+
 	/* Walk from root */
 	if (parent == &kbd_root_node) {
 		if (name_len == 4 && strncmp(name, "kbin", 4) == 0) {
@@ -553,10 +593,97 @@ static int fs_open(struct ninep_fs_node *node, uint8_t mode, void *ctx)
 	return 0;
 }
 
+/* Helper to write a child node's stat for directory reads */
+static int write_child_stat(uint8_t *buf, size_t buf_size, size_t *offset,
+                            struct ninep_fs_node *node, const char *name)
+{
+	uint32_t mode = (node->qid.type == NINEP_QTDIR) ? (0x80000000 | 0755) : 0644;
+	return ninep_write_stat(buf, buf_size, offset, &node->qid, mode,
+	                        0, name, strlen(name), "", "", "");
+}
+
+/* Helper to add one directory entry, respecting offset boundaries.
+ * Writes to temp buffer to get actual size, then includes in output only
+ * if it starts at or past the requested offset and fits completely.
+ */
+static int dir_add_entry(uint8_t *buf, size_t buf_size, size_t *buf_pos,
+                         size_t *stream_pos, uint64_t offset,
+                         struct ninep_fs_node *node, const char *name)
+{
+	uint8_t temp[128];
+	size_t temp_pos = 0;
+
+	uint32_t mode = (node->qid.type == NINEP_QTDIR) ? (0x80000000 | 0755) : 0644;
+	int ret = ninep_write_stat(temp, sizeof(temp), &temp_pos, &node->qid, mode,
+	                           0, name, strlen(name), "", "", "");
+	if (ret < 0) {
+		return ret;
+	}
+
+	size_t entry_size = temp_pos;
+
+	/* Include entry if it starts at or past the offset */
+	if (*stream_pos >= offset) {
+		if (*buf_pos + entry_size > buf_size) {
+			return -1;  /* No room for complete entry */
+		}
+		memcpy(buf + *buf_pos, temp, entry_size);
+		*buf_pos += entry_size;
+	}
+
+	*stream_pos += entry_size;
+	return 0;
+}
+
 static int fs_read(struct ninep_fs_node *node, uint64_t offset,
                    uint8_t *buf, uint32_t count, const char *uname, void *ctx)
 {
 	ARG_UNUSED(uname);
+
+	/* Directory reads return stat entries for children */
+	if (node->qid.type == NINEP_QTDIR) {
+		size_t stream_pos = 0;  /* Position in directory stream */
+		size_t buf_pos = 0;     /* Position in output buffer */
+
+		printk("[9P] DIR READ: node=%p (root=%p, settings=%p) offset=%llu count=%u\n",
+		       node, &kbd_root_node, &settings_node, offset, count);
+
+		if (node == &kbd_root_node) {
+			/* Root directory children */
+			printk("[9P] Reading root directory children\n");
+			dir_add_entry(buf, count, &buf_pos, &stream_pos, offset, &kbin_node, "kbin");
+			dir_add_entry(buf, count, &buf_pos, &stream_pos, offset, &leds_node, "leds");
+			dir_add_entry(buf, count, &buf_pos, &stream_pos, offset, &battery_node, "battery");
+			dir_add_entry(buf, count, &buf_pos, &stream_pos, offset, &ctl_node, "ctl");
+			dir_add_entry(buf, count, &buf_pos, &stream_pos, offset, &version_node, "version");
+			dir_add_entry(buf, count, &buf_pos, &stream_pos, offset, &settings_node, "settings");
+#if IS_ENABLED(CONFIG_NINEP_DFU) || IS_ENABLED(CONFIG_MEMFAULT)
+			dir_add_entry(buf, count, &buf_pos, &stream_pos, offset, &dev_node, "dev");
+#endif
+		} else if (node == &settings_node) {
+			/* Settings directory children */
+			printk("[9P] Reading settings directory children\n");
+			dir_add_entry(buf, count, &buf_pos, &stream_pos, offset, &debounce_node, "debounce");
+			dir_add_entry(buf, count, &buf_pos, &stream_pos, offset, &idle_node, "idle");
+#if IS_ENABLED(CONFIG_NINEP_DFU) || IS_ENABLED(CONFIG_MEMFAULT)
+		} else if (node == &dev_node) {
+			/* /dev directory children */
+			printk("[9P] Reading dev directory children\n");
+#if IS_ENABLED(CONFIG_NINEP_DFU)
+			dir_add_entry(buf, count, &buf_pos, &stream_pos, offset, &firmware_node, "firmware");
+#endif
+#if IS_ENABLED(CONFIG_MEMFAULT)
+			dir_add_entry(buf, count, &buf_pos, &stream_pos, offset, &mflt_node, "mflt");
+#endif
+#endif
+		} else {
+			printk("[9P] DIR READ: unknown directory node!\n");
+		}
+
+		printk("[9P] DIR READ: stream_pos=%zu buf_pos=%zu\n", stream_pos, buf_pos);
+		return buf_pos;
+	}
+
 	if (node == &kbin_node) {
 		/*
 		 * Blocking read on kbin - canonical Plan 9/Unix behavior.
@@ -635,15 +762,20 @@ static int fs_read(struct ninep_fs_node *node, uint64_t offset,
 	}
 
 	if (node == &battery_node) {
-		/* Read battery as "percentage millivolts\n" (e.g., "85 4023\n") */
+		/*
+		 * Read battery levels for split keyboard
+		 * Format: "left_pct left_mv [right_pct right_mv]\n"
+		 * e.g., "85 4023 72 3950\n" for split, "85 4023\n" for non-split
+		 * Left = central half (connected to terminal), Right = peripheral
+		 */
 		printk("[9P] battery read offset=%llu\n", offset);
 		if (offset > 0) {
 			printk("[9P] battery EOF\n");
 			return 0;  /* Already read, no more data */
 		}
 		printk("[9P] battery fetching...\n");
-		uint8_t pct = zmk_battery_state_of_charge();
-		int mv = 0;
+		uint8_t left_pct = zmk_battery_state_of_charge();
+		int left_mv = 0;
 
 		/* Get raw millivolts from sensor */
 		if (battery_dev && device_is_ready(battery_dev)) {
@@ -651,13 +783,32 @@ static int fs_read(struct ninep_fs_node *node, uint64_t offset,
 			printk("[9P] battery sensor fetch...\n");
 			if (sensor_sample_fetch_chan(battery_dev, SENSOR_CHAN_GAUGE_VOLTAGE) == 0 &&
 			    sensor_channel_get(battery_dev, SENSOR_CHAN_GAUGE_VOLTAGE, &voltage) == 0) {
-				mv = voltage.val1 * 1000 + voltage.val2 / 1000;
+				left_mv = voltage.val1 * 1000 + voltage.val2 / 1000;
 			}
 			printk("[9P] battery sensor done\n");
 		}
 
-		int len = snprintf((char *)buf, count, "%u %d\n", pct, mv);
-		printk("[9P] battery: %u%% %dmV\n", pct, mv);
+		int len;
+#ifdef SPLIT_BATTERY_SUPPORT
+		/* Get right half battery level and millivolts if available */
+		uint8_t right_pct = 0;
+		uint16_t right_mv = 0;
+		int ret = zmk_split_central_get_peripheral_battery_level(0, &right_pct);
+		if (ret == 0) {
+			zmk_split_central_get_peripheral_battery_millivolts(0, &right_mv);
+			len = snprintf((char *)buf, count, "%u %d %u %u\n",
+			               left_pct, left_mv, right_pct, right_mv);
+			printk("[9P] battery: left=%u%% %dmV, right=%u%% %umV\n",
+			       left_pct, left_mv, right_pct, right_mv);
+		} else {
+			len = snprintf((char *)buf, count, "%u %d\n", left_pct, left_mv);
+			printk("[9P] battery: left=%u%% %dmV (no right)\n",
+			       left_pct, left_mv);
+		}
+#else
+		len = snprintf((char *)buf, count, "%u %d\n", left_pct, left_mv);
+		printk("[9P] battery: %u%% %dmV\n", left_pct, left_mv);
+#endif
 		if (len < 0) {
 			return -EIO;
 		}
@@ -915,6 +1066,28 @@ static int fs_write(struct ninep_fs_node *node, uint64_t offset,
 			return count;
 		}
 
+		if (count >= 6 && strncmp((const char *)buf, "adv_on", 6) == 0) {
+			LOG_INF("Received adv_on command via /ctl");
+			int ret = bt_le_adv_start(BT_LE_ADV_CONN, ad, ARRAY_SIZE(ad), sd, ARRAY_SIZE(sd));
+			if (ret && ret != -EALREADY) {
+				LOG_ERR("Failed to start advertising: %d", ret);
+				return ret;
+			}
+			LOG_INF("BLE advertising started");
+			return count;
+		}
+
+		if (count >= 7 && strncmp((const char *)buf, "adv_off", 7) == 0) {
+			LOG_INF("Received adv_off command via /ctl");
+			int ret = bt_le_adv_stop();
+			if (ret && ret != -EALREADY) {
+				LOG_ERR("Failed to stop advertising: %d", ret);
+				return ret;
+			}
+			LOG_INF("BLE advertising stopped");
+			return count;
+		}
+
 		LOG_WRN("Unknown ctl command: %.*s", count, buf);
 		return -EINVAL;
 	}
@@ -1085,10 +1258,14 @@ static int fs_stat(struct ninep_fs_node *node, uint8_t *buf, size_t buf_size,
 	uint32_t mode;
 	uint64_t length;
 
+	printk("[9P] STAT: node=%p (root=%p) qid.type=%u qid.path=%llu\n",
+	       node, &kbd_root_node, node->qid.type, node->qid.path);
+
 	if (node == &kbd_root_node) {
 		name = "kbd";
 		mode = 0x80000000 | 0755;  // Directory with rwxr-xr-x
 		length = 0;
+		printk("[9P] STAT: root dir -> name='kbd' mode=0x%08x\n", mode);
 	} else if (node == &kbin_node) {
 		name = "kbin";
 		mode = 0444;  // Read-only file
@@ -1239,33 +1416,6 @@ static struct ninep_server kbd_server;
 static struct ninep_transport kbd_transport;
 static uint8_t rx_buf[CONFIG_NINEP_MAX_MESSAGE_SIZE];
 
-/* BLE advertising - dynamic name with MAC suffix for 1:1 terminal pairing */
-#ifdef CONFIG_ZMK_KEYBOARD_NAME
-#define BLE_BASE_NAME CONFIG_ZMK_KEYBOARD_NAME
-#else
-#define BLE_BASE_NAME "FRST-KB"
-#endif
-
-/* Buffer for dynamic device name: "FRST-M1KB-A3F2" (base + "-" + 4 hex chars + null) */
-#define BLE_NAME_MAX_LEN 32
-static char ble_device_name[BLE_NAME_MAX_LEN];
-static uint8_t ble_device_name_len;
-
-static const struct bt_data ad[] = {
-	BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
-	BT_DATA_BYTES(BT_DATA_UUID16_ALL, 0x01, 0x10),  // 0x1001 for ESP32 discovery
-#if IS_ENABLED(CONFIG_NINEP_GATT_9PIS)
-	/* 9PIS service UUID: 39500001-feed-4a91-ba88-a1e0f6e4c001 (little-endian) */
-	BT_DATA_BYTES(BT_DATA_UUID128_ALL,
-		0x01, 0xc0, 0xe4, 0xf6, 0xe0, 0xa1, 0x88, 0xba,
-		0x91, 0x4a, 0xed, 0xfe, 0x01, 0x00, 0x50, 0x39),
-#endif
-	/* Short name omitted - full name with MAC suffix in scan response */
-};
-
-/* Scan response data - built dynamically with MAC suffix */
-static struct bt_data sd[1];
-
 static void connected(struct bt_conn *conn, uint8_t err)
 {
 	struct bt_conn_info info;
@@ -1292,6 +1442,17 @@ static void connected(struct bt_conn *conn, uint8_t err)
 		        info.security.level);
 	} else {
 		LOG_INF("BLE connected");
+	}
+
+	/* Request security upgrade to trigger bonding.
+	 * As peripheral, we request L2 (encryption) which will trigger SMP pairing.
+	 * This exchanges IRK for address resolution and LTK for encryption.
+	 * The central (ESP32) will respond to this request. */
+	int ret = bt_conn_set_security(conn, BT_SECURITY_L2);
+	if (ret < 0 && ret != -EALREADY) {
+		LOG_WRN("Failed to request security: %d", ret);
+	} else {
+		LOG_INF("Security L2 requested (will bond if not already)");
 	}
 
 	LOG_INF("L2CAP server ready on PSM 0x%04x - waiting for channel connections",
@@ -1338,6 +1499,35 @@ static void le_param_updated(struct bt_conn *conn, uint16_t interval,
 	        interval, latency, timeout);
 }
 
+/* Auth info callback - called when pairing/bonding completes */
+static void kbd_pairing_complete(struct bt_conn *conn, bool bonded)
+{
+	char addr_str[BT_ADDR_LE_STR_LEN];
+	const bt_addr_le_t *dst = bt_conn_get_dst(conn);
+
+	bt_addr_le_to_str(dst, addr_str, sizeof(addr_str));
+	LOG_INF("Pairing %s: %s (bonded=%d)",
+	        bonded ? "complete" : "failed", addr_str, bonded);
+
+	if (bonded) {
+		/* Get identity info - this includes the IRK if available */
+		struct bt_conn_info info;
+		if (bt_conn_get_info(conn, &info) == 0) {
+			LOG_INF("  Security level: %d", info.security.level);
+			if (info.security.flags & BT_SECURITY_FLAG_SC) {
+				LOG_INF("  Using Secure Connections");
+			}
+			if (info.security.flags & BT_SECURITY_FLAG_OOB) {
+				LOG_INF("  OOB data used");
+			}
+		}
+	}
+}
+
+static struct bt_conn_auth_info_cb kbd_auth_info_cb = {
+	.pairing_complete = kbd_pairing_complete,
+};
+
 BT_CONN_CB_DEFINE(conn_callbacks) = {
 	.connected = connected,
 	.disconnected = disconnected,
@@ -1370,6 +1560,12 @@ int kbd_9p_server_init(void)
 		return ret;
 	}
 	LOG_INF("Bluetooth initialized");
+
+	/* Register auth info callback for pairing completion events */
+	ret = bt_conn_auth_info_cb_register(&kbd_auth_info_cb);
+	if (ret < 0 && ret != -EALREADY) {
+		LOG_WRN("Failed to register auth info callback: %d", ret);
+	}
 
 	/* Build device name with MAC suffix for unique identification */
 	{
@@ -1557,6 +1753,21 @@ static int cmd_kbd9p_advertise(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+/* Shell command to stop advertising (put keyboard in "time out" mode) */
+static int cmd_kbd9p_adv_stop(const struct shell *sh, size_t argc, char **argv)
+{
+	int ret = bt_le_adv_stop();
+	if (ret && ret != -EALREADY) {
+		shell_error(sh, "Failed to stop advertising: %d", ret);
+		return ret;
+	}
+
+	shell_print(sh, "BLE advertising stopped - keyboard is now in timeout mode");
+	shell_print(sh, "Use 'kbd9p advertise' to restart advertising");
+
+	return 0;
+}
+
 /* Shell command to reset device (MCUboot will run briefly then boot app) */
 static int cmd_kbd9p_reset(const struct shell *sh, size_t argc, char **argv)
 {
@@ -1596,12 +1807,53 @@ static int cmd_kbd9p_testkey(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+/* Shell command to test GPIO D6 (P1.00) - drives it high/low for multimeter testing */
+static int cmd_kbd9p_gpio_test(const struct shell *sh, size_t argc, char **argv)
+{
+	static const struct gpio_dt_spec d6_pin = {
+		.port = DEVICE_DT_GET(DT_NODELABEL(gpio1)),
+		.pin = 0,
+		.dt_flags = GPIO_ACTIVE_HIGH,
+	};
+
+	if (!device_is_ready(d6_pin.port)) {
+		shell_error(sh, "GPIO1 not ready");
+		return -ENODEV;
+	}
+
+	if (argc < 2) {
+		shell_print(sh, "Usage: kbd9p gpiotest <high|low|release>");
+		shell_print(sh, "  high    - drive D6/P1.00 high (should read ~3.3V)");
+		shell_print(sh, "  low     - drive D6/P1.00 low (should read ~0V)");
+		shell_print(sh, "  release - release pin (return to kscan control)");
+		return 0;
+	}
+
+	if (strcmp(argv[1], "high") == 0) {
+		gpio_pin_configure_dt(&d6_pin, GPIO_OUTPUT_HIGH);
+		shell_print(sh, "D6/P1.00 driven HIGH - measure with multimeter, should be ~3.3V");
+	} else if (strcmp(argv[1], "low") == 0) {
+		gpio_pin_configure_dt(&d6_pin, GPIO_OUTPUT_LOW);
+		shell_print(sh, "D6/P1.00 driven LOW - measure with multimeter, should be ~0V");
+	} else if (strcmp(argv[1], "release") == 0) {
+		gpio_pin_configure_dt(&d6_pin, GPIO_DISCONNECTED);
+		shell_print(sh, "D6/P1.00 released - reboot to restore kscan");
+	} else {
+		shell_error(sh, "Unknown arg: %s (use high, low, or release)", argv[1]);
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_kbd9p,
 	SHELL_CMD(status, NULL, "Show 9P keyboard server status", cmd_kbd9p_status),
 	SHELL_CMD(advertise, NULL, "Start BLE advertising", cmd_kbd9p_advertise),
+	SHELL_CMD(timeout, NULL, "Stop BLE advertising (timeout mode)", cmd_kbd9p_adv_stop),
 	SHELL_CMD(reset, NULL, "Reset device", cmd_kbd9p_reset),
 	SHELL_CMD(testlog, NULL, "Test log output (verify logging works)", cmd_kbd9p_testlog),
 	SHELL_CMD(testkey, NULL, "Inject test scancode to verify 9P path", cmd_kbd9p_testkey),
+	SHELL_CMD(gpiotest, NULL, "Test GPIO D6/P1.00 (high/low/release)", cmd_kbd9p_gpio_test),
 	SHELL_SUBCMD_SET_END
 );
 
