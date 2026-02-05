@@ -1,0 +1,8 @@
+file_format: "1"
+id: frst36
+name: FRST 36-key Wired Keyboard
+type: shield
+url: https://github.com/jrsharp/zmk
+requires: [gpio]
+features:
+  - keys
