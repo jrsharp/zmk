@@ -86,9 +86,9 @@ if ((NOT CONFIG_ZMK_SPLIT) OR CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
     target_sources(app PRIVATE src/hog.c)
   endif()
 
-  # 9P keyboard server (when not using ZMK_BLE)
-  target_sources_ifdef(CONFIG_NINEP_SERVER app PRIVATE src/kbd_9p_server.c)
-  target_sources_ifdef(CONFIG_NINEP_SERVER app PRIVATE src/frst_settings.c)
+  # 9P keyboard server over BLE (GATT 9PIS)
+  target_sources_ifdef(CONFIG_NINEP_GATT_9PIS app PRIVATE src/kbd_9p_server.c)
+  target_sources_ifdef(CONFIG_NINEP_GATT_9PIS app PRIVATE src/frst_settings.c)
 endif()
 
 # Memfault platform support
@@ -115,8 +115,8 @@ target_sources_ifdef(CONFIG_ZMK_BACKLIGHT app PRIVATE src/backlight.c)
 target_sources_ifdef(CONFIG_ZMK_LOW_PRIORITY_WORK_QUEUE app PRIVATE src/workqueue.c)
 target_sources(app PRIVATE src/main.c)
 
-# UART echo test for Phase 2 wired keyboard testing
-target_sources_ifdef(CONFIG_UART_ECHO_TEST app PRIVATE src/uart_echo/uart_echo.c)
+# UART 9P server for wired keyboard
+target_sources_ifdef(CONFIG_UART_9P_SERVER app PRIVATE src/uart_9p_server/uart_9p_server.c)
 
 add_subdirectory(src/display/)
 add_subdirectory_ifdef(CONFIG_SETTINGS src/settings/)

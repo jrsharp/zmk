@@ -608,7 +608,7 @@ endif # ZMK_USB_LOGGING || ZMK_RTT_LOGGING
 
 endmenu # Logging
 
-rsource "src/uart_echo/Kconfig"
+rsource "src/uart_9p_server/Kconfig"
 
 if SETTINGS
 

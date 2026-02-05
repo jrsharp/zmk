@@ -1,0 +1,40 @@
+# Copyright (c) 2025 Jon Sharp
+# Co-authored by Claude (Anthropic)
+# SPDX-License-Identifier: MIT
+
+menuconfig UART_9P_SERVER
+    bool "9P Keyboard Server over UART"
+    default n
+    select NINEP
+    select NINEP_SERVER
+    select NINEP_TRANSPORT_UART
+    select SERIAL
+    select UART_INTERRUPT_DRIVEN
+    select RING_BUFFER
+    help
+      Enable 9P filesystem server for keyboard input over UART.
+      Exposes /kbd/kbin (keystrokes) and /kbd/leds (LED state).
+      Used for wired keyboard connection to FRST terminal.
+
+if UART_9P_SERVER
+
+config UART_9P_DEVICE
+    string "UART device for 9P server"
+    default "uart0"
+    help
+      The UART device name to use for 9P communication.
+
+config UART_9P_RX_BUF_SIZE
+    int "UART RX buffer size"
+    default 512
+    help
+      Size of the receive buffer for 9P messages.
+
+config UART_9P_KEY_RING_SIZE
+    int "Keystroke ring buffer size"
+    default 64
+    help
+      Number of keystrokes to buffer before overflow.
+      Each keystroke is 2 bytes (scancode + flags).
+
+endif # UART_9P_SERVER
