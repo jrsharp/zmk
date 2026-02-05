@@ -386,11 +386,11 @@ static int kscan_matrix_init_output_inst(const struct device *dev,
 
     int err = gpio_pin_configure_dt(gpio, GPIO_OUTPUT);
     if (err) {
-        LOG_ERR("Unable to configure pin %u on %s for output", gpio->pin, gpio->port->name);
+        LOG_ERR("Unable to configure pin %u on %s for output (err=%d)", gpio->pin, gpio->port->name, err);
         return err;
     }
 
-    LOG_DBG("Configured pin %u on %s for output", gpio->pin, gpio->port->name);
+    LOG_INF("Configured col pin %u on %s for output", gpio->pin, gpio->port->name);
 
     return 0;
 }
@@ -398,14 +398,18 @@ static int kscan_matrix_init_output_inst(const struct device *dev,
 static int kscan_matrix_init_outputs(const struct device *dev) {
     const struct kscan_matrix_config *config = dev->config;
 
+    LOG_INF("Initializing %d output columns", config->outputs.len);
+
     for (int i = 0; i < config->outputs.len; i++) {
         const struct gpio_dt_spec *gpio = &config->outputs.gpios[i].spec;
+        LOG_INF("Column %d: port=%s pin=%u", i, gpio->port->name, gpio->pin);
         int err = kscan_matrix_init_output_inst(dev, gpio);
         if (err) {
             return err;
         }
     }
 
+    LOG_INF("All %d columns initialized successfully", config->outputs.len);
     return 0;
 }
 
@@ -481,11 +485,13 @@ static int kscan_matrix_init(const struct device *dev) {
 static int kscan_matrix_pm_action(const struct device *dev, enum pm_device_action action) {
     switch (action) {
     case PM_DEVICE_ACTION_SUSPEND:
+        LOG_INF("kscan_matrix: PM SUSPEND");
         kscan_matrix_disconnect_inputs(dev);
         kscan_matrix_disconnect_outputs(dev);
 
         return kscan_matrix_disable(dev);
     case PM_DEVICE_ACTION_RESUME:
+        LOG_INF("kscan_matrix: PM RESUME - setting up pins");
         kscan_matrix_setup_pins(dev);
         return kscan_matrix_enable(dev);
     default:
