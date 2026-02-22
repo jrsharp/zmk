@@ -11,7 +11,9 @@
 #include <zephyr/init.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/bluetooth/bluetooth.h>
+#if IS_ENABLED(CONFIG_SHELL)
 #include <zephyr/shell/shell.h>
+#endif
 #include <zephyr/sys/reboot.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/9p/server.h>
@@ -19,6 +21,10 @@
 #include <zmk/event_manager.h>
 #include <zmk/events/keycode_state_changed.h>
 #include <zmk/battery.h>
+#if IS_ENABLED(CONFIG_ZMK_USB)
+#include <zmk/usb.h>
+#include <zmk/events/usb_conn_state_changed.h>
+#endif
 #include <zephyr/drivers/sensor.h>
 #include <dt-bindings/zmk/hid_usage.h>
 #include <dt-bindings/zmk/hid_usage_pages.h>
@@ -1650,17 +1656,62 @@ int kbd_9p_server_init(void)
 	}
 	LOG_INF("9P server started");
 
-	/* Start BLE advertising (name in scan response to fit both UUIDs in adv packet) */
-	ret = bt_le_adv_start(BT_LE_ADV_CONN, ad, ARRAY_SIZE(ad), sd, ARRAY_SIZE(sd));
-	if (ret) {
-		LOG_ERR("Advertising failed to start (err %d)", ret);
-		return ret;
+	/* Start BLE advertising unless a USB host is connected */
+#if IS_ENABLED(CONFIG_ZMK_USB)
+	if (zmk_usb_get_conn_state() == ZMK_USB_CONN_HID) {
+		LOG_INF("USB host connected - deferring BLE advertising");
+	} else
+#endif
+	{
+		ret = bt_le_adv_start(BT_LE_ADV_CONN, ad, ARRAY_SIZE(ad), sd, ARRAY_SIZE(sd));
+		if (ret) {
+			LOG_ERR("Advertising failed to start (err %d)", ret);
+			return ret;
+		}
+		LOG_INF("BLE advertising started");
 	}
-	LOG_INF("BLE advertising started");
 
 	return 0;
 }
 
+/*
+ * USB/BLE mutual exclusion: when a USB host is connected, stop BLE advertising.
+ * When USB is disconnected (or charger-only), start BLE advertising for 9P.
+ */
+#if IS_ENABLED(CONFIG_ZMK_USB)
+static int usb_conn_listener(const zmk_event_t *eh)
+{
+	const struct zmk_usb_conn_state_changed *ev = as_zmk_usb_conn_state_changed(eh);
+	if (!ev) {
+		return 0;
+	}
+
+	if (ev->conn_state == ZMK_USB_CONN_HID) {
+		/* USB host connected - stop BLE advertising */
+		int ret = bt_le_adv_stop();
+		if (ret && ret != -EALREADY) {
+			LOG_WRN("Failed to stop BLE advertising: %d", ret);
+		} else {
+			LOG_INF("USB host connected - BLE advertising stopped");
+		}
+	} else {
+		/* USB disconnected or charger only - start BLE advertising */
+		int ret = bt_le_adv_start(BT_LE_ADV_CONN, ad, ARRAY_SIZE(ad), sd, ARRAY_SIZE(sd));
+		if (ret && ret != -EALREADY) {
+			LOG_WRN("Failed to start BLE advertising: %d", ret);
+		} else {
+			LOG_INF("USB disconnected - BLE advertising started");
+		}
+	}
+
+	return 0;
+}
+
+ZMK_LISTENER(kbd_9p_usb, usb_conn_listener);
+ZMK_SUBSCRIPTION(kbd_9p_usb, zmk_usb_conn_state_changed);
+#endif /* CONFIG_ZMK_USB */
+
+#if IS_ENABLED(CONFIG_SHELL)
 /* Shell command to check 9P keyboard status */
 static int cmd_kbd9p_status(const struct shell *sh, size_t argc, char **argv)
 {
@@ -1858,6 +1909,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_kbd9p,
 );
 
 SHELL_CMD_REGISTER(kbd9p, &sub_kbd9p, "9P keyboard server commands", NULL);
+#endif /* CONFIG_SHELL */
 
 /* Initialize at application level */
 SYS_INIT(kbd_9p_server_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);

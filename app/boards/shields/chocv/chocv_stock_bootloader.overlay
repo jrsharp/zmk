@@ -1,0 +1,53 @@
+/*
+ * Copyright (c) 2025 Jon Sharp
+ * Co-authored by Claude (Anthropic)
+ * SPDX-License-Identifier: MIT
+ *
+ * Stock bootloader flash partition overlay for chocv
+ *
+ * Restores the default nice_nano_v2 partition layout for use with
+ * the Adafruit UF2 bootloader instead of MCUboot.
+ *
+ * Use with chocv_stock_bootloader.conf:
+ *   west build -p -s app -b nice_nano_v2 -- -DSHIELD=chocv \
+ *     -DEXTRA_CONF_FILE=boards/shields/chocv/chocv_stock_bootloader.conf \
+ *     -DEXTRA_DTC_OVERLAY_FILE=boards/shields/chocv/chocv_stock_bootloader.overlay
+ */
+
+/* Replace MCUboot partition layout with stock Adafruit UF2 bootloader layout */
+&flash0 {
+	/delete-node/ partitions;
+
+	partitions {
+		compatible = "fixed-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		/* Adafruit UF2 bootloader + SoftDevice (152KB) */
+		sd_partition: partition@0 {
+			reg = <0x00000000 0x00026000>;
+		};
+
+		/* Application code (792KB) */
+		code_partition: partition@26000 {
+			reg = <0x00026000 0x000c6000>;
+		};
+
+		/* NVS/settings storage (32KB) */
+		storage_partition: partition@ec000 {
+			reg = <0x000ec000 0x00008000>;
+		};
+
+		/* Bootloader info (48KB) */
+		boot_partition: partition@f4000 {
+			reg = <0x000f4000 0x0000c000>;
+		};
+	};
+};
+
+/* Point code-partition to the stock location */
+/ {
+	chosen {
+		zephyr,code-partition = &code_partition;
+	};
+};
