@@ -51,3 +51,8 @@
 		zephyr,code-partition = &code_partition;
 	};
 };
+
+/* Enable wakeup from sleep on keypress (chocv.overlay has it commented out) */
+&kscan0 {
+	wakeup-source;
+};

@@ -327,6 +327,11 @@ static const char *dfu_state_names[] = {
 /* Helper: Add scan code to buffer */
 static void add_scancode(uint8_t code)
 {
+	/* Don't buffer keystrokes when no client has kbin open */
+	if (!atomic_get(&kbin_client_connected)) {
+		return;
+	}
+
 	k_mutex_lock(&scancode_mutex, K_FOREVER);
 	scancode_buf[scancode_head] = code;
 	scancode_head = (scancode_head + 1) % SCANCODE_BUF_SIZE;
@@ -591,6 +596,11 @@ static int fs_open(struct ninep_fs_node *node, uint8_t mode, void *ctx)
 {
 	if (node == &kbin_node) {
 		printk("[9P] OPEN kbin - setting connected=1\n");
+		/* Flush any stale scancodes before accepting reads */
+		k_mutex_lock(&scancode_mutex, K_FOREVER);
+		scancode_head = 0;
+		scancode_tail = 0;
+		k_mutex_unlock(&scancode_mutex);
 		atomic_set(&kbin_client_connected, 1);
 	} else if (node == &leds_node) {
 		printk("[9P] OPEN leds\n");
@@ -756,7 +766,10 @@ static int fs_read(struct ninep_fs_node *node, uint64_t offset,
 	}
 
 	if (node == &leds_node) {
-		/* Read current LED state */
+		/* Read current LED state (1 byte) */
+		if (offset > 0) {
+			return 0;  /* Already read */
+		}
 		if (count > 0) {
 			k_mutex_lock(&led_mutex, K_FOREVER);
 			buf[0] = led_state;
@@ -826,7 +839,7 @@ static int fs_read(struct ninep_fs_node *node, uint64_t offset,
 		if (offset > 0) {
 			return 0;  /* Already read */
 		}
-		const char *help = "reboot - restart device\n";
+		const char *help = "reboot\nadv_on\nadv_off\n";
 		size_t len = strlen(help);
 		size_t to_copy = MIN(len, (size_t)count);
 		memcpy(buf, help, to_copy);
@@ -1287,7 +1300,7 @@ static int fs_stat(struct ninep_fs_node *node, uint8_t *buf, size_t buf_size,
 	} else if (node == &ctl_node) {
 		name = "ctl";
 		mode = 0644;  // Read-write file
-		length = 32;  // Help text length
+		length = 21;  // "reboot\nadv_on\nadv_off\n"
 	} else if (node == &version_node) {
 		name = "version";
 		mode = 0444;  // Read-only file
@@ -1687,12 +1700,19 @@ static int usb_conn_listener(const zmk_event_t *eh)
 	}
 
 	if (ev->conn_state == ZMK_USB_CONN_HID) {
-		/* USB host connected - stop BLE advertising */
+		/* USB host connected - stop BLE advertising and disconnect active clients */
 		int ret = bt_le_adv_stop();
 		if (ret && ret != -EALREADY) {
 			LOG_WRN("Failed to stop BLE advertising: %d", ret);
 		} else {
 			LOG_INF("USB host connected - BLE advertising stopped");
+		}
+		/* Disconnect any active L2CAP 9P channels */
+		ret = ninep_transport_stop(&kbd_transport);
+		if (ret && ret != -EINVAL) {
+			LOG_WRN("Failed to stop L2CAP transport: %d", ret);
+		} else {
+			LOG_INF("Active BLE 9P connections disconnected");
 		}
 	} else {
 		/* USB disconnected or charger only - start BLE advertising */
