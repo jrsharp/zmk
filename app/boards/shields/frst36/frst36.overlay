@@ -13,6 +13,7 @@
     chosen {
         zmk,kscan = &kscan0;
         zmk,matrix-transform = &default_transform;
+        zephyr,console = &uart1;
     };
 
     /*
@@ -47,8 +48,8 @@ RC(2,0) RC(2,1) RC(2,2) RC(2,3) RC(2,4)    RC(2,5) RC(2,6) RC(2,7) RC(2,8) RC(2,
      * Key matrix scan configuration
      * Uses pico_header connector for GPIO access
      *
-     * Rows: GP2, GP3, GP4, GP5 (directly driven, active high)
-     * Cols: GP6-GP15 (active high with pull-down, directly connected)
+     * Rows: GP29, GP28, GP2, GP3 (active high with pull-down)
+     * Cols: GP10, GP11, GP14, GP15, GP26, GP5, GP6, GP7, GP8, GP9 (active high)
      *
      * Note: diode-direction is col2row (diodes from column to row)
      */
@@ -60,34 +61,24 @@ RC(2,0) RC(2,1) RC(2,2) RC(2,3) RC(2,4)    RC(2,5) RC(2,6) RC(2,7) RC(2,8) RC(2,
         debounce-release-ms = <10>;
 
         row-gpios
-            = <&pico_header 2 (GPIO_ACTIVE_HIGH | GPIO_PULL_DOWN)>
+            = <&gpio0 29 (GPIO_ACTIVE_HIGH | GPIO_PULL_DOWN)>
+            , <&pico_header 28 (GPIO_ACTIVE_HIGH | GPIO_PULL_DOWN)>
+            , <&pico_header 2 (GPIO_ACTIVE_HIGH | GPIO_PULL_DOWN)>
             , <&pico_header 3 (GPIO_ACTIVE_HIGH | GPIO_PULL_DOWN)>
-            , <&pico_header 4 (GPIO_ACTIVE_HIGH | GPIO_PULL_DOWN)>
-            , <&pico_header 5 (GPIO_ACTIVE_HIGH | GPIO_PULL_DOWN)>
             ;
 
         col-gpios
-            = <&pico_header 6 GPIO_ACTIVE_HIGH>
+            = <&pico_header 10 GPIO_ACTIVE_HIGH>
+            , <&pico_header 11 GPIO_ACTIVE_HIGH>
+            , <&pico_header 14 GPIO_ACTIVE_HIGH>
+            , <&pico_header 15 GPIO_ACTIVE_HIGH>
+            , <&pico_header 26 GPIO_ACTIVE_HIGH>
+            , <&pico_header 5 GPIO_ACTIVE_HIGH>
+            , <&pico_header 6 GPIO_ACTIVE_HIGH>
             , <&pico_header 7 GPIO_ACTIVE_HIGH>
             , <&pico_header 8 GPIO_ACTIVE_HIGH>
             , <&pico_header 9 GPIO_ACTIVE_HIGH>
-            , <&pico_header 10 GPIO_ACTIVE_HIGH>
-            , <&pico_header 11 GPIO_ACTIVE_HIGH>
-            , <&pico_header 12 GPIO_ACTIVE_HIGH>
-            , <&pico_header 13 GPIO_ACTIVE_HIGH>
-            , <&pico_header 14 GPIO_ACTIVE_HIGH>
-            , <&pico_header 15 GPIO_ACTIVE_HIGH>
             ;
-    };
-};
-
-/*
- * USB CDC ACM for console/debug output
- * This keeps UART0 free for 9P communication with ESP32-S3
- */
-&zephyr_udc0 {
-    cdc_acm_uart: cdc_acm_uart {
-        compatible = "zephyr,cdc-acm-uart";
     };
 };
 
@@ -98,4 +89,23 @@ RC(2,0) RC(2,1) RC(2,2) RC(2,3) RC(2,4)    RC(2,5) RC(2,6) RC(2,7) RC(2,8) RC(2,
 &uart0 {
     status = "okay";
     current-speed = <115200>;
+};
+
+/*
+ * UART1 on GP4 (TX only) for debug console
+ * Connect USB-UART adapter RX to GP4, share GND
+ */
+&pinctrl {
+    uart1_default: uart1_default {
+        group1 {
+            pinmux = <UART1_TX_P4>;
+        };
+    };
+};
+
+&uart1 {
+    status = "okay";
+    current-speed = <115200>;
+    pinctrl-0 = <&uart1_default>;
+    pinctrl-names = "default";
 };

@@ -610,6 +610,13 @@ endmenu # Logging
 
 rsource "src/uart_9p_server/Kconfig"
 
+config LAYER_INDICATOR
+	bool "Layer indicator LED"
+	depends on GPIO
+	help
+	  Enable WS2812 LED layer indicator on GP16 (RP2040-Zero onboard LED).
+	  Green = base layer, Yellow = numbers, Red = symbols.
+
 if SETTINGS
 
 config ZMK_SETTINGS_RESET_ON_START

@@ -128,7 +128,7 @@ static int send_keyboard_report(void) {
         }
         return err;
 #else
-        LOG_ERR("USB endpoint is not supported");
+        LOG_DBG("USB endpoint is not supported");
         return -ENOTSUP;
 #endif /* IS_ENABLED(CONFIG_ZMK_USB) */
     }
@@ -162,7 +162,7 @@ static int send_consumer_report(void) {
         }
         return err;
 #else
-        LOG_ERR("USB endpoint is not supported");
+        LOG_DBG("USB endpoint is not supported");
         return -ENOTSUP;
 #endif /* IS_ENABLED(CONFIG_ZMK_USB) */
     }
@@ -212,7 +212,7 @@ int zmk_endpoints_send_mouse_report() {
         }
         return err;
 #else
-        LOG_ERR("USB endpoint is not supported");
+        LOG_DBG("USB endpoint is not supported");
         return -ENOTSUP;
 #endif /* IS_ENABLED(CONFIG_ZMK_USB) */
     }

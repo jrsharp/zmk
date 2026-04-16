@@ -118,6 +118,9 @@ target_sources(app PRIVATE src/main.c)
 # UART 9P server for wired keyboard
 target_sources_ifdef(CONFIG_UART_9P_SERVER app PRIVATE src/uart_9p_server/uart_9p_server.c)
 
+# Layer indicator LED (WS2812 on RP2040-Zero GP16)
+target_sources_ifdef(CONFIG_LAYER_INDICATOR app PRIVATE src/layer_indicator.c)
+
 add_subdirectory(src/display/)
 add_subdirectory_ifdef(CONFIG_SETTINGS src/settings/)
 
