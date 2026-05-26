@@ -1,15 +1,67 @@
+/*
+ * RP2040 board overlay for ZMK with MCUboot
+ *
+ * Flash layout (2MB total) — must match bootloader/mcuboot/boot/zephyr/boards/rpi_pico.overlay
+ *   0x00000 - 0x00100: Second-stage bootloader / boot2 (256B, read-only)
+ *   0x00100 - 0x10000: MCUboot bootloader (~64KB)
+ *   0x10000 - 0x50000: Primary slot / App (256KB)
+ *   0x50000 - 0x90000: Secondary slot / DFU (256KB)
+ *   0x90000 - 0x94000: MCUboot scratch (16KB)
+ *   0x94000 - 0xA0000: Settings/NVS (48KB)
+ */
 
 &uart0 { status = "disabled"; };
 
-&code_partition {
-    reg = <0x100 (DT_SIZE_M(2) - 0x100 - DT_SIZE_K(512))>;
-};
-
 &flash0 {
+    /delete-node/ partitions;
+
     partitions {
-        storage_partition: partition@180000 {
-            reg = <0x180000 DT_SIZE_K(512)>;
+        compatible = "fixed-partitions";
+        #address-cells = <1>;
+        #size-cells = <1>;
+
+        /* RP2040 second-stage bootloader (boot2) */
+        second_stage_bootloader: partition@0 {
+            reg = <0x00000000 0x00000100>;
             read-only;
         };
+
+        /* MCUboot bootloader */
+        boot_partition: partition@100 {
+            label = "mcuboot";
+            reg = <0x00000100 0x0000ff00>;
+            read-only;
+        };
+
+        /* Primary application slot */
+        slot0_partition: partition@10000 {
+            label = "image-0";
+            reg = <0x00010000 0x00040000>;
+        };
+
+        /* Secondary slot for DFU updates */
+        slot1_partition: partition@50000 {
+            label = "image-1";
+            reg = <0x00050000 0x00040000>;
+        };
+
+        /* Scratch area for MCUboot swap operations */
+        scratch_partition: partition@90000 {
+            label = "image-scratch";
+            reg = <0x00090000 0x00004000>;
+        };
+
+        /* Settings/NVS storage */
+        storage_partition: partition@94000 {
+            label = "storage";
+            reg = <0x00094000 0x0000c000>;
+        };
+    };
+};
+
+/* Application runs from slot0 */
+/ {
+    chosen {
+        zephyr,code-partition = &slot0_partition;
     };
 };

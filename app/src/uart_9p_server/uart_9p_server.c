@@ -31,11 +31,44 @@
 #include <zmk/events/keycode_state_changed.h>
 
 #include <string.h>
+#include <stdlib.h>
 #include <version.h>
+
+#if IS_ENABLED(CONFIG_NINEP_DFU)
+#include <zephyr/dfu/mcuboot.h>
+#include <zephyr/dfu/flash_img.h>
+#include <zephyr/storage/flash_map.h>
+#endif
 
 LOG_MODULE_REGISTER(uart_9p, CONFIG_LOG_DEFAULT_LEVEL);
 
-#define FRST_FW_VERSION "0.3.0-dev+" STRINGIFY(BUILD_VERSION)
+#define FRST_FW_VERSION "0.3.1-dev+" STRINGIFY(BUILD_VERSION)
+
+/* Layer indicator API */
+extern uint32_t layer_indicator_get_timeout(void);
+extern void layer_indicator_set_timeout(uint32_t seconds);
+
+/*
+ * DFU state (conditional on CONFIG_NINEP_DFU)
+ */
+#if IS_ENABLED(CONFIG_NINEP_DFU)
+enum dfu_state { DFU_IDLE, DFU_ERASING, DFU_RECEIVING, DFU_FINALIZING, DFU_COMPLETE, DFU_ERROR };
+
+static struct {
+    enum dfu_state state;
+    uint32_t bytes_written;
+    int last_error;
+    uint32_t last_progress_log;
+    struct flash_img_context flash_ctx;
+} dfu = { .state = DFU_IDLE };
+
+#define DFU_PROGRESS_LOG_INTERVAL (50 * 1024)
+
+static const char *dfu_state_names[] = {
+    [DFU_IDLE] = "idle", [DFU_ERASING] = "erasing", [DFU_RECEIVING] = "receiving",
+    [DFU_FINALIZING] = "finalizing", [DFU_COMPLETE] = "complete", [DFU_ERROR] = "error",
+};
+#endif /* CONFIG_NINEP_DFU */
 
 /* Scancode ring buffer — raw PS/2 byte stream */
 RING_BUF_DECLARE(key_ring, CONFIG_UART_9P_KEY_RING_SIZE * 2);
@@ -140,6 +173,24 @@ static struct ninep_fs_node leds_node = {
     .name = "leds", .type = NINEP_NODE_FILE,
     .qid = { .type = NINEP_QTFILE, .version = 0, .path = 3 }
 };
+static struct ninep_fs_node cfg_dir_node = {
+    .name = "cfg", .type = NINEP_NODE_DIR,
+    .qid = { .type = NINEP_QTDIR, .version = 0, .path = 6 }
+};
+static struct ninep_fs_node led_timeout_node = {
+    .name = "led_timeout", .type = NINEP_NODE_FILE,
+    .qid = { .type = NINEP_QTFILE, .version = 0, .path = 7 }
+};
+#if IS_ENABLED(CONFIG_NINEP_DFU)
+static struct ninep_fs_node dev_dir_node = {
+    .name = "dev", .type = NINEP_NODE_DIR,
+    .qid = { .type = NINEP_QTDIR, .version = 0, .path = 4 }
+};
+static struct ninep_fs_node firmware_node = {
+    .name = "firmware", .type = NINEP_NODE_FILE,
+    .qid = { .type = NINEP_QTFILE, .version = 0, .path = 5 }
+};
+#endif
 
 static struct ninep_fs_node *fs_get_root(void *ctx)
     { ARG_UNUSED(ctx); return &kbd_root_node; }
@@ -148,9 +199,22 @@ static struct ninep_fs_node *fs_walk(struct ninep_fs_node *parent,
     const char *name, uint16_t name_len, void *ctx)
 {
     ARG_UNUSED(ctx);
-    if (parent != &kbd_root_node) return NULL;
-    if (name_len == 4 && strncmp(name, "kbin", 4) == 0) return &kbin_node;
-    if (name_len == 4 && strncmp(name, "leds", 4) == 0) return &leds_node;
+    if (parent == &kbd_root_node) {
+        if (name_len == 4 && strncmp(name, "kbin", 4) == 0) return &kbin_node;
+        if (name_len == 4 && strncmp(name, "leds", 4) == 0) return &leds_node;
+        if (name_len == 3 && strncmp(name, "cfg", 3) == 0) return &cfg_dir_node;
+#if IS_ENABLED(CONFIG_NINEP_DFU)
+        if (name_len == 3 && strncmp(name, "dev", 3) == 0) return &dev_dir_node;
+#endif
+    }
+    if (parent == &cfg_dir_node) {
+        if (name_len == 11 && strncmp(name, "led_timeout", 11) == 0) return &led_timeout_node;
+    }
+#if IS_ENABLED(CONFIG_NINEP_DFU)
+    if (parent == &dev_dir_node) {
+        if (name_len == 8 && strncmp(name, "firmware", 8) == 0) return &firmware_node;
+    }
+#endif
     return NULL;
 }
 
@@ -170,6 +234,56 @@ static int fs_read(struct ninep_fs_node *node, uint64_t offset,
         return 0;
     }
     if (node == &kbd_root_node) return 0;
+    if (node == &cfg_dir_node) return 0;
+    if (node == &led_timeout_node) {
+        if (offset > 0) return 0;
+        char val[16];
+        int len = snprintf(val, sizeof(val), "%u\n", layer_indicator_get_timeout());
+        size_t to_copy = MIN((size_t)len, (size_t)count);
+        memcpy(buf, val, to_copy);
+        return to_copy;
+    }
+#if IS_ENABLED(CONFIG_NINEP_DFU)
+    if (node == &dev_dir_node) return 0;
+    if (node == &firmware_node) {
+        if (offset > 0) return 0;
+        char status[256];
+        int len = 0;
+        len += snprintf(status + len, sizeof(status) - len,
+                        "state %s\n", dfu_state_names[dfu.state]);
+        if (dfu.state == DFU_RECEIVING) {
+            len += snprintf(status + len, sizeof(status) - len,
+                            "bytes %u\n", dfu.bytes_written);
+        }
+        if (dfu.state == DFU_ERROR) {
+            len += snprintf(status + len, sizeof(status) - len,
+                            "error %d\n", dfu.last_error);
+        }
+        struct mcuboot_img_header hdr;
+        int ret = boot_read_bank_header(FIXED_PARTITION_ID(slot0_partition),
+                                        &hdr, sizeof(hdr));
+        if (ret == 0 && hdr.mcuboot_version == 1) {
+            len += snprintf(status + len, sizeof(status) - len,
+                            "current %d.%d.%d+%d\n",
+                            hdr.h.v1.sem_ver.major, hdr.h.v1.sem_ver.minor,
+                            hdr.h.v1.sem_ver.revision, hdr.h.v1.sem_ver.build_num);
+        }
+        ret = boot_read_bank_header(FIXED_PARTITION_ID(slot1_partition),
+                                    &hdr, sizeof(hdr));
+        if (ret == 0 && hdr.mcuboot_version == 1) {
+            len += snprintf(status + len, sizeof(status) - len,
+                            "pending %d.%d.%d+%d\n",
+                            hdr.h.v1.sem_ver.major, hdr.h.v1.sem_ver.minor,
+                            hdr.h.v1.sem_ver.revision, hdr.h.v1.sem_ver.build_num);
+        }
+        len += snprintf(status + len, sizeof(status) - len,
+                        "confirmed %s\n",
+                        boot_is_img_confirmed() ? "yes" : "no");
+        size_t to_copy = MIN((size_t)len, (size_t)count);
+        memcpy(buf, status, to_copy);
+        return to_copy;
+    }
+#endif
     return -ENOENT;
 }
 
@@ -178,6 +292,57 @@ static int fs_write(struct ninep_fs_node *node, uint64_t offset,
 {
     ARG_UNUSED(ctx); ARG_UNUSED(uname); ARG_UNUSED(offset);
     if (node == &leds_node && count >= 1) { led_state = buf[0]; return 1; }
+    if (node == &led_timeout_node) {
+        /* Parse decimal string, e.g. "30\n" or "0" */
+        char tmp[16];
+        size_t len = MIN(count, sizeof(tmp) - 1);
+        memcpy(tmp, buf, len);
+        tmp[len] = '\0';
+        uint32_t val = (uint32_t)strtoul(tmp, NULL, 10);
+        layer_indicator_set_timeout(val);
+        return count;
+    }
+#if IS_ENABLED(CONFIG_NINEP_DFU)
+    if (node == &firmware_node) {
+        int ret;
+        if (dfu.state != DFU_RECEIVING) {
+            dfu.state = DFU_ERASING;
+            LOG_INF("DFU: erasing secondary slot...");
+            ret = boot_erase_img_bank(FIXED_PARTITION_ID(slot1_partition));
+            if (ret < 0) {
+                LOG_ERR("DFU: erase failed: %d", ret);
+                dfu.state = DFU_ERROR;
+                dfu.last_error = ret;
+                return ret;
+            }
+            ret = flash_img_init(&dfu.flash_ctx);
+            if (ret < 0) {
+                LOG_ERR("DFU: flash_img_init failed: %d", ret);
+                dfu.state = DFU_ERROR;
+                dfu.last_error = ret;
+                return ret;
+            }
+            dfu.bytes_written = 0;
+            dfu.last_progress_log = 0;
+            dfu.state = DFU_RECEIVING;
+            LOG_INF("DFU: receiving firmware");
+        }
+        ret = flash_img_buffered_write(&dfu.flash_ctx, buf, count, false);
+        if (ret < 0) {
+            LOG_ERR("DFU: flash write failed: %d", ret);
+            dfu.state = DFU_ERROR;
+            dfu.last_error = ret;
+            return ret;
+        }
+        dfu.bytes_written += count;
+        if ((dfu.bytes_written / DFU_PROGRESS_LOG_INTERVAL) >
+            (dfu.last_progress_log / DFU_PROGRESS_LOG_INTERVAL)) {
+            LOG_INF("DFU: %u bytes received", dfu.bytes_written);
+            dfu.last_progress_log = dfu.bytes_written;
+        }
+        return count;
+    }
+#endif
     return -EACCES;
 }
 
@@ -190,6 +355,12 @@ static int fs_stat(struct ninep_fs_node *node, uint8_t *buf,
     if (node == &kbd_root_node) { mode = 0x80000000 | 0755; name = ""; }
     else if (node == &kbin_node) { mode = 0444; length = ring_buf_size_get(&key_ring); }
     else if (node == &leds_node) { mode = 0222; length = 1; }
+    else if (node == &cfg_dir_node) { mode = 0x80000000 | 0755; }
+    else if (node == &led_timeout_node) { mode = 0666; }
+#if IS_ENABLED(CONFIG_NINEP_DFU)
+    else if (node == &dev_dir_node) { mode = 0x80000000 | 0755; }
+    else if (node == &firmware_node) { mode = 0666; }
+#endif
     else return -ENOENT;
     size_t off = 0;
     return ninep_write_stat(buf, buf_len, &off, &node->qid, mode,
@@ -197,7 +368,46 @@ static int fs_stat(struct ninep_fs_node *node, uint8_t *buf,
 }
 
 static int fs_clunk(struct ninep_fs_node *node, void *ctx)
-    { ARG_UNUSED(ctx); ARG_UNUSED(node); return 0; }
+{
+    ARG_UNUSED(ctx);
+#if IS_ENABLED(CONFIG_NINEP_DFU)
+    if (node == &firmware_node && dfu.state == DFU_RECEIVING) {
+        int ret;
+        dfu.state = DFU_FINALIZING;
+        LOG_INF("DFU: flushing (%u bytes total)...", dfu.bytes_written);
+        ret = flash_img_buffered_write(&dfu.flash_ctx, NULL, 0, true);
+        if (ret < 0) {
+            LOG_ERR("DFU: flush failed: %d", ret);
+            dfu.state = DFU_ERROR;
+            dfu.last_error = ret;
+            return ret;
+        }
+        struct mcuboot_img_header hdr;
+        ret = boot_read_bank_header(FIXED_PARTITION_ID(slot1_partition),
+                                    &hdr, sizeof(hdr));
+        if (ret < 0 || hdr.mcuboot_version != 1) {
+            LOG_ERR("DFU: invalid image header");
+            dfu.state = DFU_ERROR;
+            dfu.last_error = ret < 0 ? ret : -EINVAL;
+            return -EINVAL;
+        }
+        LOG_INF("DFU: image v%d.%d.%d+%d validated",
+                hdr.h.v1.sem_ver.major, hdr.h.v1.sem_ver.minor,
+                hdr.h.v1.sem_ver.revision, hdr.h.v1.sem_ver.build_num);
+        ret = boot_request_upgrade(BOOT_UPGRADE_TEST);
+        if (ret < 0) {
+            LOG_ERR("DFU: upgrade request failed: %d", ret);
+            dfu.state = DFU_ERROR;
+            dfu.last_error = ret;
+            return ret;
+        }
+        dfu.state = DFU_COMPLETE;
+        LOG_INF("DFU: complete — reboot to apply");
+    }
+#endif
+    ARG_UNUSED(node);
+    return 0;
+}
 
 static const struct ninep_fs_ops kbd_fs_ops = {
     .get_root = fs_get_root, .walk = fs_walk, .open = fs_open,
