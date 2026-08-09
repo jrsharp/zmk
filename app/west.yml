@@ -4,6 +4,8 @@ manifest:
       url-base: https://github.com/zephyrproject-rtos
     - name: zmkfirmware
       url-base: https://github.com/zmkfirmware
+    - name: jrsharp
+      url-base: https://github.com/jrsharp
     - name: memfault
       url-base: https://github.com/memfault
   projects:
@@ -39,8 +41,8 @@ manifest:
       remote: zmkfirmware
     - name: 9p4z
       path: modules/lib/9p4z
-      url: /mnt2/src/9p4z.tmp
-      revision: main
+      remote: jrsharp
+      revision: 71adac9d762e15320b34ebdfcbef97e974c0e617
     - name: memfault-firmware-sdk
       path: modules/lib/memfault-firmware-sdk
       revision: 1.30.3

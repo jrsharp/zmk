@@ -69,7 +69,7 @@ Pin 1 (VTG)    ──────► 3.3V (optional, for voltage sense)
 
 ```bash
 # Activate virtualenv
-cd /mnt2/src/zmk && source .venv/bin/activate
+cd $ZMK && source .venv/bin/activate
 
 # Verify J-Link connection
 nrfjprog --ids
@@ -101,18 +101,18 @@ mcumgr --conntype=serial --connstring="dev=/dev/ttyACM0,baud=115200" image uploa
 ## Rebuild Commands
 
 ```bash
-cd /mnt2/src/zmk && source .venv/bin/activate
+cd $ZMK && source .venv/bin/activate
 
 # Rebuild MCUboot (if needed)
 cd bootloader/mcuboot/boot/zephyr
-west build -p -b nice_nano_v2_mcuboot -- -DBOARD_ROOT=/mnt2/src/zmk/bootloader/mcuboot/boot/zephyr
+west build -p -b nice_nano_v2_mcuboot -- -DBOARD_ROOT=$ZMK/bootloader/mcuboot/boot/zephyr
 
 # Rebuild ZMK
-cd /mnt2/src/zmk/app
-west build -p -b nice_nano_v2 -- -DSHIELD=chocv -DCONFIG_MCUBOOT_SIGNATURE_KEY_FILE=\"/mnt2/src/zmk/keys/nice_nano_ecdsa_p256.pem\"
+cd $ZMK/app
+west build -p -b nice_nano_v2 -- -DSHIELD=chocv -DCONFIG_MCUBOOT_SIGNATURE_KEY_FILE=\"$ZMK/keys/nice_nano_ecdsa_p256.pem\"
 
 # Recreate merged hex
-cd /mnt2/src/zmk && source .venv/bin/activate
+cd $ZMK && source .venv/bin/activate
 python3 -c "
 from intelhex import IntelHex
 mcuboot = IntelHex('bootloader/mcuboot/boot/zephyr/build/zephyr/zephyr.hex')

@@ -12,9 +12,16 @@ including MCUboot bootloader and signed application.
 
 ## Prerequisites
 
+Paths below are written relative to `$ZMK`, the ZMK west workspace this
+repository sits in:
+
+```bash
+export ZMK=/path/to/zmk
+```
+
 ```bash
 # Activate ZMK virtualenv
-cd /mnt2/src/zmk && source .venv/bin/activate
+cd $ZMK && source .venv/bin/activate
 
 # Verify tools
 west --version
@@ -24,7 +31,7 @@ nrfjprog --version
 ## Directory Structure
 
 ```
-/mnt2/src/zmk/
+$ZMK/
 ├── app/                          # ZMK application
 │   ├── boards/shields/chocv/     # ChocV shield config
 │   ├── src/kbd_9p_server.c       # 9P keyboard server
@@ -54,13 +61,13 @@ nrfjprog --version
 ### 1. Build MCUboot Bootloader
 
 ```bash
-cd /mnt2/src/zmk/bootloader/mcuboot/boot/zephyr
+cd $ZMK/bootloader/mcuboot/boot/zephyr
 
 # Clean build with production signing key
 rm -rf build
 west build -p -b nice_nano_v2_mcuboot -- \
-  -DBOARD_ROOT=/mnt2/src/zmk/bootloader/mcuboot/boot/zephyr \
-  -DCONFIG_BOOT_SIGNATURE_KEY_FILE=\"/mnt2/src/zmk/keys/production-signing-key.pem\"
+  -DBOARD_ROOT=$ZMK/bootloader/mcuboot/boot/zephyr \
+  -DCONFIG_BOOT_SIGNATURE_KEY_FILE=\"$ZMK/keys/production-signing-key.pem\"
 ```
 
 Output: `build/zephyr/zephyr.hex` (~21KB)
@@ -68,7 +75,7 @@ Output: `build/zephyr/zephyr.hex` (~21KB)
 ### 2. Build ZMK Application
 
 ```bash
-cd /mnt2/src/zmk/app
+cd $ZMK/app
 
 west build -p -b nice_nano_v2 -- -DSHIELD=chocv
 ```
@@ -81,27 +88,27 @@ Output: `build/zephyr/zmk.hex` (~304KB)
 west sign -t imgtool \
   -B build/zephyr/zmk-signed.bin \
   -H build/zephyr/zmk-signed.hex \
-  -- --key /mnt2/src/zmk/keys/production-signing-key.pem --version 1.0.0
+  -- --key $ZMK/keys/production-signing-key.pem --version 1.0.0
 ```
 
 ### 4. Merge MCUboot + Signed App
 
 ```bash
 mergehex -m \
-  /mnt2/src/zmk/bootloader/mcuboot/boot/zephyr/build/zephyr/zephyr.hex \
-  /mnt2/src/zmk/app/build/zephyr/zmk-signed.hex \
-  -o /mnt2/src/zmk/app/build/mcuboot_zmk_merged.hex
+  $ZMK/bootloader/mcuboot/boot/zephyr/build/zephyr/zephyr.hex \
+  $ZMK/app/build/zephyr/zmk-signed.hex \
+  -o $ZMK/app/build/mcuboot_zmk_merged.hex
 ```
 
 ### 5. Flash via SWD
 
 ```bash
 # Full chip erase + program (first time or recovery)
-nrfjprog --program /mnt2/src/zmk/app/build/mcuboot_zmk_merged.hex \
+nrfjprog --program $ZMK/app/build/mcuboot_zmk_merged.hex \
   --chiperase --verify --reset
 
 # Or just the app (if MCUboot unchanged)
-nrfjprog --program /mnt2/src/zmk/app/build/zephyr/zmk-signed.hex \
+nrfjprog --program $ZMK/app/build/zephyr/zmk-signed.hex \
   --sectorerase --verify --reset
 ```
 
@@ -110,7 +117,7 @@ nrfjprog --program /mnt2/src/zmk/app/build/zephyr/zmk-signed.hex \
 ```bash
 #!/bin/bash
 set -e
-cd /mnt2/src/zmk && source .venv/bin/activate
+cd $ZMK && source .venv/bin/activate
 
 # Rebuild app
 cd app && west build -b nice_nano_v2 -- -DSHIELD=chocv
@@ -119,11 +126,11 @@ cd app && west build -b nice_nano_v2 -- -DSHIELD=chocv
 west sign -t imgtool \
   -B build/zephyr/zmk-signed.bin \
   -H build/zephyr/zmk-signed.hex \
-  -- --key /mnt2/src/zmk/keys/production-signing-key.pem --version 1.0.0
+  -- --key $ZMK/keys/production-signing-key.pem --version 1.0.0
 
 # Merge
 mergehex -m \
-  /mnt2/src/zmk/bootloader/mcuboot/boot/zephyr/build/zephyr/zephyr.hex \
+  $ZMK/bootloader/mcuboot/boot/zephyr/build/zephyr/zephyr.hex \
   build/zephyr/zmk-signed.hex \
   -o build/mcuboot_zmk_merged.hex
 
@@ -161,7 +168,7 @@ The same ECDSA-P256 key can be used for ESP32 MCUboot builds:
 
 ```bash
 west build -b <esp32_board> -- \
-  -DCONFIG_BOOT_SIGNATURE_KEY_FILE=\"/mnt2/src/zmk/keys/production-signing-key.pem\"
+  -DCONFIG_BOOT_SIGNATURE_KEY_FILE=\"$ZMK/keys/production-signing-key.pem\"
 ```
 
 ## Troubleshooting

@@ -348,7 +348,7 @@ _____________________
 
 ## File Outputs
 
-Save all data to: `/mnt2/src/zmk/power-measurements/`
+Save all data to: `$ZMK/power-measurements/`
 
 ```
 power-measurements/
